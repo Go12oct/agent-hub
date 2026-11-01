@@ -38,6 +38,17 @@ The daemon's configuration and random access token are stored in
 printed by the daemon or included in routine logs; `agent-hub pair` displays it
 inside the pairing QR code for setup.
 
+### Troubleshooting phone connections
+
+The PC and phone must be on the same reachable Wi-Fi or Tailscale network.
+`agent-hub pair` lists candidate addresses and marks the QR target. If the
+phone cannot connect, choose the PC's Wi-Fi address explicitly, for example
+`agent-hub pair --url http://192.168.8.3:4747`. Avoid hotspot, virtual-adapter,
+and `169.254.x.x` addresses. Windows Firewall must allow inbound TCP port 4747;
+the installer requests permission to add that rule. If it was declined, run
+`agent-hub firewall` and approve the UAC prompt. The rule applies to all
+Windows network profiles, including Public.
+
 ### Remote access with Tailscale
 
 For access away from home, install Tailscale on the Windows PC and Android

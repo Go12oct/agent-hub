@@ -32,14 +32,26 @@ function authorized(request: any, token: string): boolean {
   return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer);
 }
 
-function lanUrls(port: number): string[] {
-  const addresses = new Set<string>();
-  for (const interfaces of Object.values(os.networkInterfaces())) {
+export function lanUrls(port: number, networkInterfaces = os.networkInterfaces()): string[] {
+  const priorities = new Map<string, { priority: number; order: number }>();
+  let order = 0;
+  for (const [name, interfaces] of Object.entries(networkInterfaces)) {
     for (const address of interfaces || []) {
-      if (address.family === 'IPv4' && !address.internal && !address.address.startsWith('169.254.')) addresses.add(address.address);
+      if (address.family !== 'IPv4' || address.internal || address.address.startsWith('169.254.')) continue;
+      const [first, second] = address.address.split('.').map(Number);
+      const tailscale = first === 100 && second !== undefined && second >= 64 && second <= 127;
+      const virtualAdapter = /vethernet|virtual|vmware|vbox|virtualbox|hyper-v|wsl|docker|bluetooth|loopback|local area connection\*/i.test(name);
+      const hotspotAddress = address.address.startsWith('192.168.137.');
+      const preferredAdapter = /wi-?fi|wlan|wireless|^en|^eth|ethernet/i.test(name);
+      const priority = tailscale ? 0 : virtualAdapter || hotspotAddress ? 3 : preferredAdapter ? 1 : 2;
+      const previous = priorities.get(address.address);
+      if (!previous || priority < previous.priority) priorities.set(address.address, { priority, order });
+      order += 1;
     }
   }
-  return [...addresses].map((address) => `http://${address}:${port}`);
+  return [...priorities.entries()]
+    .sort(([, left], [, right]) => left.priority - right.priority || left.order - right.order)
+    .map(([address]) => `http://${address}:${port}`);
 }
 
 export function createHub(config: HubConfig, options: { collectors?: Collector[]; staticDir?: string } = {}): HubRuntime {
@@ -145,5 +157,3 @@ export async function startServer(config: HubConfig): Promise<HubRuntime> {
   console.log(`Agent Hub listening on ${config.host}:${config.port}`);
   return runtime;
 }
-
-export { lanUrls };

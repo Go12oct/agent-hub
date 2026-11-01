@@ -19,6 +19,13 @@ function runProcess(command: string, args: string[]): Promise<void> {
   });
 }
 
+async function addWindowsFirewallRule(): Promise<void> {
+  const firewallCommand = "try { New-NetFirewallRule -DisplayName 'Agent Hub' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4747 -Profile Any -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }";
+  const encodedCommand = Buffer.from(firewallCommand, 'utf16le').toString('base64');
+  const elevationCommand = `$ErrorActionPreference = 'Stop'; try { $rule = Get-NetFirewallRule -DisplayName 'Agent Hub' -Direction Inbound -Action Allow -ErrorAction SilentlyContinue; if (-not $rule) { $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodedCommand}'); if ($process.ExitCode -ne 0) { exit $process.ExitCode } }; exit 0 } catch { exit 1 }`;
+  await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', elevationCommand]);
+}
+
 async function run(): Promise<void> {
   const [command = 'start', ...args] = process.argv.slice(2);
   if (command === 'start') {
@@ -29,17 +36,36 @@ async function run(): Promise<void> {
     process.once('SIGTERM', () => void close());
   } else if (command === 'pair') {
     const config = await loadConfig();
-    const addresses = new Set(lanUrls(config.port));
-    for (const list of Object.values(os.networkInterfaces())) {
-      for (const address of list || []) {
-        if (address.family === 'IPv4' && /^100\./.test(address.address)) addresses.add(`http://${address.address}:${config.port}`);
-      }
+    const candidates = lanUrls(config.port);
+    const urlOption = args.indexOf('--url');
+    const overrideValue = urlOption >= 0 ? args[urlOption + 1] : undefined;
+    if (urlOption >= 0 && (!overrideValue || overrideValue.startsWith('--'))) {
+      throw new Error('Usage: agent-hub pair [--url <url>]');
     }
-    const urls = [...addresses];
-    console.log('Agent Hub pairing URLs:');
-    urls.forEach((url) => console.log(`  ${url}`));
-    const pairing = `agenthub://pair?url=${encodeURIComponent(urls[0] || `http://127.0.0.1:${config.port}`)}&token=${encodeURIComponent(config.token)}`;
+    let overrideUrl: string | undefined;
+    if (overrideValue) {
+      const parsed = new URL(overrideValue);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('The --url value must use http or https.');
+      overrideUrl = parsed.origin;
+    }
+    const chosenUrl = overrideUrl || candidates[0] || `http://127.0.0.1:${config.port}`;
+    const displayedUrls = candidates.includes(chosenUrl) ? candidates : [...candidates, chosenUrl];
+    console.log('Agent Hub pairing URLs (chosen URL marked):');
+    displayedUrls.forEach((url) => console.log(`  ${url}${url === chosenUrl ? ' (chosen)' : ''}`));
+    console.log("If the phone can't connect, try another URL with: agent-hub pair --url http://<ip>:4747");
+    const pairing = `agenthub://pair?url=${encodeURIComponent(chosenUrl)}&token=${encodeURIComponent(config.token)}`;
     qrcode.generate(pairing, { small: true });
+  } else if (command === 'firewall') {
+    if (process.platform !== 'win32') {
+      console.log('The Agent Hub firewall rule can only be configured on Windows.');
+      return;
+    }
+    try {
+      await addWindowsFirewallRule();
+      console.log('Windows Firewall allows Agent Hub on TCP port 4747.');
+    } catch {
+      console.warn('Could not add the Windows Firewall rule. Approve the UAC prompt or run agent-hub firewall as administrator.');
+    }
   } else if (command === 'config' && args[0] === 'set' && args[1] && args[2] !== undefined) {
     await setConfigValue(args[1], args.slice(2).join(' '));
     console.log(`Updated ${args[1]}`);
@@ -107,7 +133,7 @@ async function run(): Promise<void> {
     }
   } else {
     console.log(`Agent Hub CLI
-Usage: agent-hub [start|pair|install-claude-hooks|uninstall-claude-hooks|install-service|uninstall-service|config set <key> <value>]
+Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-service|uninstall-service|config set <key> <value>]
 Config directory: ${configDirectory()}`);
   }
 }

@@ -74,6 +74,7 @@ export function AgentHub() {
   const [tokenInput, setTokenInput] = useState('');
   const [pairInput, setPairInput] = useState('');
   const [setupError, setSetupError] = useState('');
+  const [connecting, setConnecting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -153,16 +154,18 @@ export function AgentHub() {
   ).sort(sessionOrder), [sessions, selectedAgent, search]);
   const groups = feedGroups(filtered);
 
-  async function connect() {
+  async function connect(pairingLink = pairInput) {
     setSetupError('');
-    const pair = parsePairingLink(pairInput) || (urlInput.trim() && tokenInput.trim() ? parsePairingLink(`${urlInput.trim()}?token=${encodeURIComponent(tokenInput.trim())}`) : undefined);
+    const pair = parsePairingLink(pairingLink) || (urlInput.trim() && tokenInput.trim() ? parsePairingLink(`${urlInput.trim()}?token=${encodeURIComponent(tokenInput.trim())}`) : undefined);
     if (!pair) { setSetupError('Enter a valid pairing link, hub URL, and token.'); return; }
+    setConnecting(true);
     try {
-      const response = await fetch(`${pair.url}/health`);
+      const response = await fetch(`${pair.url}/health`, { signal: AbortSignal.timeout(8000) });
       if (!response.ok) throw new Error();
       await savePairing(pair);
       setPairing(pair);
-    } catch { setSetupError('Agent Hub is unreachable. Check the address and that your devices share a network.'); }
+    } catch { setSetupError(`Can't reach ${pair.url} — same Wi-Fi? Windows Firewall?`); }
+    finally { setConnecting(false); }
   }
 
   async function scanQr() {
@@ -173,7 +176,10 @@ export function AgentHub() {
         scanInstructions: 'Scan the Agent Hub pairing QR code',
       });
       const value = result.ScanResult;
-      if (value) { setPairInput(value); }
+      if (value) {
+        setPairInput(value);
+        await connect(value);
+      }
     } catch { setSetupError('QR scanning is unavailable. Paste the pairing link instead.'); }
   }
 
@@ -198,7 +204,7 @@ export function AgentHub() {
           <label className="field-label">Pairing link</label>
           <div className="input-with-action">
             <input value={pairInput} onChange={(event) => setPairInput(event.target.value)} placeholder="agenthub://pair?url=…&token=…" />
-            {Capacitor.isNativePlatform() && <button className="scan-button" onClick={() => void scanQr()} aria-label="Scan QR code"><QrCode size={18} /></button>}
+            {Capacitor.isNativePlatform() && <button className="scan-button" onClick={() => void scanQr()} aria-label="Scan QR code" disabled={connecting}><QrCode size={18} /></button>}
           </div>
           <div className="field-divider"><span>OR ENTER MANUALLY</span></div>
           <label className="field-label">Hub address</label>
@@ -206,7 +212,9 @@ export function AgentHub() {
           <label className="field-label">Access token</label>
           <input value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="Paste token from agent-hub pair" />
           {setupError && <div className="error-note">{setupError}</div>}
-          <button className="primary-button" onClick={() => void connect()}>Connect to Agent Hub <ChevronRight size={17} /></button>
+          <button className="primary-button" onClick={() => void connect()} disabled={connecting}>
+            {connecting ? <><LoaderCircle className="spin" size={17} /> Connecting…</> : <>Connect to Agent Hub <ChevronRight size={17} /></>}
+          </button>
           <div className="secure-note"><LockKeyhole size={13} /> Your session data stays on your computer.</div>
         </div>
         <div className="setup-footer"><span><span className="live-pulse" /> LOCAL-FIRST · PRIVATE BY DESIGN</span><span>v1.0</span></div>

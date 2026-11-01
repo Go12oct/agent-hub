@@ -42,6 +42,32 @@ if (Test-Path $webDir) {
 }
 $env:PATH = "$installDir;$env:PATH"
 & $shim install-service
+$firewallRule = Get-NetFirewallRule -DisplayName "Agent Hub" -Direction Inbound -Action Allow -ErrorAction SilentlyContinue
+if (-not $firewallRule) {
+  $firewallCommand = "try { New-NetFirewallRule -DisplayName 'Agent Hub' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4747 -Profile Any -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }"
+  $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($firewallCommand))
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList $identity
+  if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    try {
+      New-NetFirewallRule -DisplayName "Agent Hub" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4747 -Profile Any -ErrorAction Stop | Out-Null
+      Write-Host "Added the Agent Hub Windows Firewall rule for TCP port 4747."
+    } catch {
+      Write-Warning "Could not add the Agent Hub Windows Firewall rule. Run 'agent-hub firewall' as administrator."
+    }
+  } else {
+    try {
+      $elevated = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand)
+      if ($elevated.ExitCode -eq 0) {
+        Write-Host "Added the Agent Hub Windows Firewall rule for TCP port 4747."
+      } else {
+        Write-Warning "The Agent Hub Windows Firewall rule was not added. Run 'agent-hub firewall' as administrator."
+      }
+    } catch {
+      Write-Warning "The firewall UAC prompt was declined; the Agent Hub Windows Firewall rule was not added. Run 'agent-hub firewall' later."
+    }
+  }
+}
 & $shim install-claude-hooks
 if (-not $SkipPair) {
   & $shim pair
