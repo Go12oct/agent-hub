@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import type { AgentSession } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
+import { ReplyBusyError, type ReplyAgent, type ReplyRunner } from '../src/local-replies';
 import { createHub } from '../src/server';
 
 class FakeCollector implements Collector {
@@ -26,7 +27,28 @@ class FailingReplyCollector extends ReplyCollector {
   }
 }
 
-const config = { token: 'test-token', port: 4747, host: '127.0.0.1', lookbackDays: 7, codexCloud: { enabled: false } };
+class FakeLocalReplyRunner implements ReplyRunner {
+  onChange?: (sessionId: string) => void;
+  running = new Set<string>();
+  sent: Array<{ sessionId: string; text: string }> = [];
+  supports(agent: ReplyAgent): boolean { return agent === 'codex'; }
+  isRunning(sessionId: string): boolean { return this.running.has(sessionId); }
+  async send(session: AgentSession, text: string): Promise<void> {
+    if (this.running.has(session.id)) throw new ReplyBusyError();
+    this.sent.push({ sessionId: session.id, text });
+    this.running.add(session.id);
+    this.onChange?.(session.id);
+  }
+}
+
+const config = {
+  token: 'test-token',
+  port: 4747,
+  host: '127.0.0.1',
+  lookbackDays: 7,
+  codexCloud: { enabled: false },
+  localReplies: { enabled: false },
+};
 
 function testSession(agent: AgentSession['agent'], nativeId: string): AgentSession {
   return {
@@ -93,6 +115,45 @@ describe('authenticated HTTP API', () => {
       });
       expect(response.statusCode).toBe(204);
       expect(collector.sent).toEqual([{ nativeId: 'session-123', text: 'Please add a test' }]);
+    } finally { await runtime.close(); }
+  });
+
+  it('starts local replies with 202 and presents their capability and running status', async () => {
+    const collector = new FakeCollector();
+    const replyRunner = new FakeLocalReplyRunner();
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.({ ...testSession('codex', 'session-123'), status: 'done' });
+    try {
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/codex:session-123/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Run the tests' },
+      });
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toEqual({ ok: true });
+      expect(replyRunner.sent).toEqual([{ sessionId: 'codex:session-123', text: 'Run the tests' }]);
+
+      const sessions = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(sessions.json()).toEqual([
+        expect.objectContaining({ id: 'codex:session-123', canReply: true, status: 'working' }),
+      ]);
+
+      const busy = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/codex:session-123/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Another prompt' },
+      });
+      expect(busy.statusCode).toBe(409);
+      expect(busy.json()).toEqual({ error: 'That agent is still working on your last message' });
     } finally { await runtime.close(); }
   });
 

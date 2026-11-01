@@ -485,16 +485,20 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
     if (!text || sending) return;
     setSending(true);
     setSendError('');
+    setMessages((existing) => [...existing, { role: 'user', text, at: new Date().toISOString() }]);
+    stick.current = true;
     try {
       const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/messages`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       });
-      if (!response.ok) throw new Error();
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: unknown };
+        setSendError(typeof body.error === 'string' ? body.error : 'Message not sent. Try again.');
+        return;
+      }
       setDraft('');
-      setMessages((existing) => [...existing, { role: 'user', text, at: new Date().toISOString() }]);
-      stick.current = true;
       setTimeout(() => void load(), 2500);
     } catch {
       setSendError('Message not sent. Try again.');

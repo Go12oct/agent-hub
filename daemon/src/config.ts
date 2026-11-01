@@ -11,6 +11,7 @@ export interface HubConfig {
   devinApiKey?: string;
   ntfy?: { server: string; topic: string };
   codexCloud: { enabled: boolean };
+  localReplies?: { enabled?: boolean; codex?: string; claude?: string; agy?: string };
 }
 
 export function configDirectory(): string {
@@ -38,6 +39,7 @@ export async function loadConfig(): Promise<HubConfig> {
       host: '0.0.0.0',
       lookbackDays: 7,
       codexCloud: { enabled: false },
+      localReplies: { enabled: true },
     };
     await writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   }

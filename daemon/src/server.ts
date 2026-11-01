@@ -5,7 +5,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentSession, SessionMessage } from '@agent-hub/shared';
+import { agentLabels, type AgentSession, type SessionMessage } from '@agent-hub/shared';
 import type { Collector } from './collectors/types.js';
 import { ClaudeCollector, type ClaudeHookPayload } from './collectors/claude.js';
 import { CodexCollector } from './collectors/codex.js';
@@ -13,12 +13,14 @@ import { AntigravityCollector } from './collectors/antigravity.js';
 import { DevinCollector } from './collectors/devin.js';
 import { CodexCloudCollector } from './collectors/codex-cloud.js';
 import type { HubConfig } from './config.js';
+import { LocalReplyRunner, ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner } from './local-replies.js';
 import { NtfyNotifier } from './notifications.js';
 
 export interface HubRuntime {
   app: FastifyInstance;
   sessions: Map<string, AgentSession>;
   collectors: Collector[];
+  ready: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -54,7 +56,14 @@ export function lanUrls(port: number, networkInterfaces = os.networkInterfaces()
     .map(([address]) => `http://${address}:${port}`);
 }
 
-export function createHub(config: HubConfig, options: { collectors?: Collector[]; staticDir?: string } = {}): HubRuntime {
+function isReplyAgent(agent: AgentSession['agent']): agent is ReplyAgent {
+  return agent === 'codex' || agent === 'claude-code' || agent === 'antigravity';
+}
+
+export function createHub(
+  config: HubConfig,
+  options: { collectors?: Collector[]; staticDir?: string; replyRunner?: ReplyRunner } = {},
+): HubRuntime {
   const app = Fastify({ logger: false });
   const sessions = new Map<string, AgentSession>();
   const claude = new ClaudeCollector(config.lookbackDays);
@@ -65,23 +74,53 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     ...(config.devinApiKey ? [new DevinCollector(config.devinApiKey)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];
+  const replyRunner = options.replyRunner ?? (config.localReplies?.enabled === false ? undefined : new LocalReplyRunner({
+    commands: {
+      codex: config.localReplies?.codex,
+      'claude-code': config.localReplies?.claude,
+      antigravity: config.localReplies?.agy,
+    },
+  }));
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
   const eventClients = new Set<{ write: (data: string) => void }>();
 
+  const present = (session: AgentSession): AgentSession => ({
+    ...session,
+    canReply: session.agent === 'devin'
+      ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
+      : isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent)),
+    status: replyRunner?.isRunning(session.id) ? 'working' : session.status,
+  });
+  const broadcast = (session: AgentSession) => {
+    const data = JSON.stringify(present(session));
+    for (const client of eventClients) client.write(`event: upsert\ndata: ${data}\n\n`);
+  };
   const emit: import('./collectors/types.js').EmitSession = (session) => {
     sessions.set(session.id, session);
     void notifier.update(session);
-    const data = JSON.stringify(session);
-    for (const client of eventClients) client.write(`event: upsert\ndata: ${data}\n\n`);
+    broadcast(session);
   };
   emit.remove = (id) => {
     sessions.delete(id);
     for (const client of eventClients) client.write(`event: remove\ndata: ${JSON.stringify({ id })}\n\n`);
   };
+  if (replyRunner) {
+    const previousOnChange = replyRunner.onChange;
+    replyRunner.onChange = (id) => {
+      previousOnChange?.(id);
+      const session = sessions.get(id);
+      if (session) broadcast(session);
+    };
+  }
   for (const collector of collectors) {
     collector.start(emit);
   }
   console.log(`Collectors started: ${collectors.map((collector) => collector.name).join(', ')}`);
+  const ready = replyRunner?.init
+    ? replyRunner.init().then(() => {
+      for (const session of sessions.values()) broadcast(session);
+    })
+    : Promise.resolve();
 
   app.register(cors, { origin: true, credentials: false });
   app.get<{ Querystring: { nonce?: string } }>('/health', async (request, reply) => {
@@ -101,7 +140,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
       return reply.code(401).send({ error: 'Unauthorized' });
     }
   });
-  app.get('/api/sessions', async () => [...sessions.values()].sort((a, b) => {
+  app.get('/api/sessions', async () => [...sessions.values()].map(present).sort((a, b) => {
     const rank = (status: AgentSession['status']) => status === 'needs_input' ? 0 : status === 'working' ? 1 : 2;
     return rank(a.status) - rank(b.status) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
   }));
@@ -118,7 +157,9 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     const session = sessions.get(request.params.id);
     if (!session) return reply.code(404).send({ error: 'Session not found' });
     const collector = collectors.find((item) => item.name === session.agent);
-    if (!collector?.sendMessage) {
+    const isDevinReply = session.agent === 'devin' && Boolean(collector?.sendMessage);
+    const isLocalReply = isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent));
+    if (!isDevinReply && !isLocalReply) {
       return reply.code(405).send({ error: 'Replies are not supported for this agent' });
     }
     const text = request.body?.text;
@@ -126,10 +167,19 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
       return reply.code(400).send({ error: 'text must be between 1 and 10000 characters' });
     }
     try {
-      await collector.sendMessage(session.nativeId, text);
-      return reply.code(204).send();
-    } catch {
-      return reply.code(502).send({ error: 'Failed to send reply' });
+      if (isDevinReply) {
+        await collector!.sendMessage!(session.nativeId, text);
+        return reply.code(204).send();
+      }
+      await replyRunner!.send(session, text);
+      return reply.code(202).send({ ok: true });
+    } catch (error) {
+      if (error instanceof ReplyBusyError) {
+        return reply.code(409).send({ error: 'That agent is still working on your last message' });
+      }
+      if (isDevinReply) return reply.code(502).send({ error: 'Failed to send reply' });
+      const tail = error instanceof ReplyFailedError ? error.stderrTail : '';
+      return reply.code(502).send({ error: tail || `Failed to start ${agentLabels[session.agent]}` });
     }
   });
   app.get('/api/pair', async () => ({
@@ -146,7 +196,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     });
     const client = { write: (data: string) => reply.raw.write(data) };
     eventClients.add(client);
-    client.write(`event: snapshot\ndata: ${JSON.stringify([...sessions.values()])}\n\n`);
+    client.write(`event: snapshot\ndata: ${JSON.stringify([...sessions.values()].map(present))}\n\n`);
     const heartbeat = setInterval(() => client.write(': heartbeat\n\n'), 20_000);
     reply.raw.on('close', () => {
       clearInterval(heartbeat);
@@ -171,6 +221,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     app,
     sessions,
     collectors,
+    ready,
     async close() {
       await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
       await app.close();
@@ -181,6 +232,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
 export async function startServer(config: HubConfig): Promise<HubRuntime> {
   if (!config.devinApiKey) console.warn('Devin: no API key; run agent-hub config set devinApiKey <key>');
   const runtime = createHub(config);
+  await runtime.ready;
   await runtime.app.listen({ host: config.host, port: config.port });
   console.log(`Agent Hub listening on ${config.host}:${config.port}`);
   return runtime;
