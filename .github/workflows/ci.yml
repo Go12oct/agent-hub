@@ -49,6 +49,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - run: npm ci
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - run: npm run build:web
