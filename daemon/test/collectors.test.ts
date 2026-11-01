@@ -326,8 +326,9 @@ describe('Antigravity transcript parser', () => {
   });
 
   it('only reports errors that are not superseded by later messages or completion', () => {
-    const modifiedAt = new Date().toISOString();
-    const parse = (records: Record<string, any>[]) => parseAntigravityRecords(records, 'anti-state', modifiedAt, Date.now());
+    const now = Date.now();
+    const modifiedAt = new Date(now).toISOString();
+    const parse = (records: Record<string, any>[]) => parseAntigravityRecords(records, 'anti-state', modifiedAt, now);
 
     expect(parse([
       { type: 'error', text: 'Earlier failure' },
@@ -340,7 +341,14 @@ describe('Antigravity transcript parser', () => {
       { type: 'turn_aborted' },
     ]);
     expect(aborted.statusFacts.errored).toBe(false);
-    expect(aborted.session.status).not.toBe('error');
+    expect(aborted.session.status).toBe('done');
+    expect(parse([
+      { role: 'assistant', text: 'Request failed', status: 'ERROR' },
+    ]).session.status).toBe('error');
+    expect(parse([
+      { role: 'assistant', text: 'Request failed', status: 'ERROR' },
+      { role: 'assistant', text: 'Completed', turnComplete: true },
+    ]).session.status).toBe('done');
   });
 });
 

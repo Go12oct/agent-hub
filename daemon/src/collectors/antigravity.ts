@@ -61,7 +61,12 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
         || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
     }
-    if (/error|fail/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) {
+    const abortOnly = /abort/.test(kind) && !/error|fail/.test(kind);
+    if (abortOnly) {
+      complete = true;
+      lastRole = 'assistant';
+      lastActivityIndex = index;
+    } else if (/error|fail/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) {
       lastErrorIndex = index;
     }
     if (/turn[_-]?complete|task[_-]?complete/.test(kind)) {
@@ -70,7 +75,7 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       lastActivityIndex = index;
     }
   }
-  const error = lastErrorIndex > lastActivityIndex;
+  const error = lastErrorIndex >= 0 && lastErrorIndex >= lastActivityIndex;
   const session = buildSession({
     agent: 'antigravity',
     nativeId: id,
