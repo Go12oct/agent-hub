@@ -114,12 +114,22 @@ describe('watched collector cache', () => {
     await writeFile(file, '{"fixture":true}\n');
     const collector = new CachedFileCollector(home, file);
     const parseSpy = vi.spyOn(collector, 'parse');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await collector.scan(() => {});
       await collector.scan(() => {});
       expect(parseSpy).toHaveBeenCalledTimes(1);
       expect(collector.refreshCount).toBe(2);
+      expect(logSpy.mock.calls[0]?.[0]).toMatch(/^\[cached-test\] rescan: 1 files, 1 parsed, \d+ ms$/);
+      expect(logSpy.mock.calls[1]?.[0]).toMatch(/^\[cached-test\] rescan: 1 files, 0 parsed, \d+ ms$/);
+      await writeFile(file, '{"fixture":false}\n');
+      parseSpy.mockRejectedValue(new Error('synthetic parse failure'));
+      await collector.scan(() => {});
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/^\[cached-test\] rescan failed after \d+ ms: synthetic parse failure$/));
     } finally {
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
       await collector.stop();
       await rm(home, { recursive: true, force: true });
     }

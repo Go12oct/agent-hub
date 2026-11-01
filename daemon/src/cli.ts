@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { cp, mkdir, copyFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { createWriteStream, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isSea } from 'node:sea';
 import qrcode from 'qrcode-terminal';
+import { format } from 'node:util';
 import { loadConfig, setConfigValue, configDirectory } from './config.js';
 import { installClaudeHooks, uninstallClaudeHooks } from './claude-hooks.js';
 import { firewallRuleScript } from './firewall.js';
@@ -25,9 +26,31 @@ async function addWindowsFirewallRule(port: number): Promise<void> {
   await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCommand]);
 }
 
+async function enableFileLogging(): Promise<void> {
+  const logPath = process.env.AGENT_HUB_LOG || (process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'agent-hub', 'agent-hub.log')
+    : undefined);
+  if (!logPath) return;
+  await mkdir(path.dirname(logPath), { recursive: true });
+  const stream = createWriteStream(logPath, { flags: 'w' });
+  const original = {
+    log: console.log.bind(console) as (...args: unknown[]) => void,
+    warn: console.warn.bind(console) as (...args: unknown[]) => void,
+    error: console.error.bind(console) as (...args: unknown[]) => void,
+  };
+  stream.on('error', (error) => original.error(`Agent Hub log write failed: ${error.message}`));
+  for (const level of ['log', 'warn', 'error'] as const) {
+    console[level] = (...args: unknown[]) => {
+      original[level](...args);
+      stream.write(`${new Date().toISOString()} ${format(...args as any[])}\n`);
+    };
+  }
+}
+
 async function run(): Promise<void> {
   const [command = 'start', ...args] = process.argv.slice(2);
   if (command === 'start') {
+    await enableFileLogging();
     const config = await loadConfig();
     const runtime = await startServer(config);
     const close = async () => { await runtime.close(); process.exit(0); };

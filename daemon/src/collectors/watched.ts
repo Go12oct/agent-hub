@@ -90,8 +90,12 @@ export abstract class WatchedCollector implements Collector {
 
   protected async rescan(): Promise<void> {
     if (!this.emit || this.stopped) return;
+    const startedAt = Date.now();
+    let fileCount = 0;
+    let parsedCount = 0;
     try {
       const files = await this.findFiles();
+      fileCount = files.length;
       const present = new Set(files);
       const active = new Set<string>();
       for (const file of files) {
@@ -101,6 +105,7 @@ export abstract class WatchedCollector implements Collector {
         let cached = this.parsedFiles.get(file);
         if (!cached || cached.key !== key) {
           const parsed = await this.parse(file);
+          parsedCount++;
           if (!parsed) {
             this.parsedFiles.delete(file);
             continue;
@@ -126,9 +131,10 @@ export abstract class WatchedCollector implements Collector {
         this.fileById.delete(session.nativeId);
         this.emit.remove?.(id);
       }
+      console.log(`[${this.name}] rescan: ${fileCount} files, ${parsedCount} parsed, ${Date.now() - startedAt} ms`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[${this.name}] scan failed: ${message}`);
+      console.warn(`[${this.name}] rescan failed after ${Date.now() - startedAt} ms: ${message}`);
     }
   }
 

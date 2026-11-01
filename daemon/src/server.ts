@@ -81,6 +81,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
   for (const collector of collectors) {
     collector.start(emit);
   }
+  console.log(`Collectors started: ${collectors.map((collector) => collector.name).join(', ')}`);
 
   app.register(cors, { origin: true, credentials: false });
   app.get<{ Querystring: { nonce?: string } }>('/health', async (request, reply) => {
