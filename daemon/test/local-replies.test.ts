@@ -215,7 +215,7 @@ describe('LocalReplyRunner', () => {
     });
   });
 
-  it('records a timeout after the startup window', async () => {
+  it('keeps an unresponsive timed-out process active through the SIGKILL grace period', async () => {
     vi.useFakeTimers();
     const child = fakeChild();
     const { runner } = createRunner(child, { startupMs: 10, timeoutMs: 20 });
@@ -233,9 +233,14 @@ describe('LocalReplyRunner', () => {
     expect(runner.isRunning(session.id)).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(runner.isRunning(session.id)).toBe(true);
+    expect(runner.failure(session.id)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(runner.isRunning(session.id)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
     expect(runner.isRunning(session.id)).toBe(false);
     expect(runner.failure(session.id)).toEqual({
-      error: 'Timed out after 20 minutes',
+      error: "Couldn't stop Codex after timeout",
       at: expect.any(String),
     });
   });

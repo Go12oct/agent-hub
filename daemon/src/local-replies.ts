@@ -227,6 +227,7 @@ export class LocalReplyRunner implements ReplyRunner {
       let timeout: NodeJS.Timeout;
       let forceKillTimer: NodeJS.Timeout | undefined;
       let exitGraceTimer: NodeJS.Timeout | undefined;
+      let stopGraceTimer: NodeJS.Timeout | undefined;
       let spawned = child.pid !== undefined;
       let exited = false;
       const finish = (code: number | null, error?: Error) => {
@@ -236,6 +237,7 @@ export class LocalReplyRunner implements ReplyRunner {
         clearTimeout(timeout);
         if (forceKillTimer) clearTimeout(forceKillTimer);
         if (exitGraceTimer) clearTimeout(exitGraceTimer);
+        if (stopGraceTimer) clearTimeout(stopGraceTimer);
         if (this.active.get(session.id)?.child === child) this.active.delete(session.id);
         const failed = Boolean(error || pendingFailure) || code !== 0;
         const failureMessage = error
@@ -263,11 +265,13 @@ export class LocalReplyRunner implements ReplyRunner {
             if (finished) return;
             try {
               child.kill('SIGKILL');
-            } catch {
-              if (!exited) finish(null);
-              return;
-            }
-            if (!finished && !exited) finish(null);
+            } catch {}
+            if (finished) return;
+            stopGraceTimer = setTimeout(() => {
+              if (finished) return;
+              pendingFailure = `Couldn't stop ${agentLabels[agent]} after timeout`;
+              finish(null);
+            }, 30_000);
           }, 10_000);
         }
       }, this.timeoutMs);
