@@ -226,13 +226,16 @@ export class LocalReplyRunner implements ReplyRunner {
       let startupTimer: NodeJS.Timeout;
       let timeout: NodeJS.Timeout;
       let forceKillTimer: NodeJS.Timeout | undefined;
+      let exitGraceTimer: NodeJS.Timeout | undefined;
       let spawned = child.pid !== undefined;
+      let exited = false;
       const finish = (code: number | null, error?: Error) => {
         if (finished) return;
         finished = true;
         clearTimeout(startupTimer);
         clearTimeout(timeout);
         if (forceKillTimer) clearTimeout(forceKillTimer);
+        if (exitGraceTimer) clearTimeout(exitGraceTimer);
         if (this.active.get(session.id)?.child === child) this.active.delete(session.id);
         const failed = Boolean(error || pendingFailure) || code !== 0;
         const failureMessage = error
@@ -261,8 +264,10 @@ export class LocalReplyRunner implements ReplyRunner {
             try {
               child.kill('SIGKILL');
             } catch {
+              if (!exited) finish(null);
               return;
             }
+            if (!finished && !exited) finish(null);
           }, 10_000);
         }
       }, this.timeoutMs);
@@ -282,6 +287,11 @@ export class LocalReplyRunner implements ReplyRunner {
       child.once('error', (error) => {
         if (!spawned) finish(null, error);
         else pendingFailure ||= error.message || 'Local reply process error';
+      });
+      child.once('exit', (code) => {
+        if (finished) return;
+        exited = true;
+        exitGraceTimer = setTimeout(() => finish(code), 5_000);
       });
       child.once('close', (code) => finish(code));
       child.stdin?.on('error', (error) => {

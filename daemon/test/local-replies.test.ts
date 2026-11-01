@@ -229,16 +229,42 @@ describe('LocalReplyRunner', () => {
 
     expect(runner.isRunning(session.id)).toBe(true);
     expect(runner.failure(session.id)).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    await vi.advanceTimersByTimeAsync(9_999);
     expect(runner.isRunning(session.id)).toBe(true);
-    expect(runner.failure(session.id)).toBeUndefined();
-
-    child.emit('close', null);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     expect(runner.isRunning(session.id)).toBe(false);
     expect(runner.failure(session.id)).toEqual({
       error: 'Timed out after 20 minutes',
       at: expect.any(String),
     });
+  });
+
+  it('finalizes after exit when close does not arrive', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const { runner } = createRunner(child, { startupMs: 10 });
+    await runner.init();
+
+    const sending = runner.send(session, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await sending;
+
+    child.emit('exit', 2);
+    expect(runner.isRunning(session.id)).toBe(true);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(runner.isRunning(session.id)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(runner.isRunning(session.id)).toBe(false);
+    const failure = runner.failure(session.id);
+    expect(failure).toEqual({
+      error: 'Codex stopped with exit code 2',
+      at: expect.any(String),
+    });
+
+    child.emit('close', 9);
+    expect(runner.failure(session.id)).toEqual(failure);
   });
 });
