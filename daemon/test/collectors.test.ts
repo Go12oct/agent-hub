@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -41,8 +42,14 @@ class InspectableAntigravityCollector extends AntigravityCollector {
   async discover(): Promise<string[]> { return this.findFiles(); }
 }
 
-function collectorWatchTargets(collector: WatchedCollector): { paths: string[]; depth?: number } {
-  return (collector as unknown as { watchTargets(): { paths: string[]; depth?: number } }).watchTargets();
+function collectorWatchTargets(collector: WatchedCollector): {
+  paths: string[];
+  depth?: number;
+  ignored?: (path: string, stats?: Stats) => boolean;
+} {
+  return (collector as unknown as {
+    watchTargets(): { paths: string[]; depth?: number; ignored?: (path: string, stats?: Stats) => boolean };
+  }).watchTargets();
 }
 
 async function fixtureLines(file: string): Promise<Record<string, any>[]> {
@@ -151,26 +158,61 @@ describe('Antigravity discovery and watcher scope', () => {
     process.env.CODEX_HOME = '/synthetic/codex';
     try {
       expect(collectorWatchTargets(new CodexCollector())).toEqual({
-        paths: ['/synthetic/codex/sessions', '/synthetic/codex/archived_sessions'],
+        paths: [path.join('/synthetic/codex', 'sessions'), path.join('/synthetic/codex', 'archived_sessions')],
         depth: 3,
       });
       expect(collectorWatchTargets(new ClaudeCollector())).toEqual({
-        paths: ['/synthetic/home/.claude/projects'],
+        paths: [path.join('/synthetic/home', '.claude', 'projects')],
         depth: 2,
       });
       expect(collectorWatchTargets(new AntigravityCollector())).toEqual({
         paths: [
-          '/synthetic/home/.gemini/antigravity-ide/conversations',
-          '/synthetic/home/.gemini/antigravity/conversations',
-          '/synthetic/home/.gemini/antigravity-cli/conversations',
+          path.join('/synthetic/home', '.gemini', 'antigravity-ide', 'conversations'),
+          path.join('/synthetic/home', '.gemini', 'antigravity', 'conversations'),
+          path.join('/synthetic/home', '.gemini', 'antigravity-cli', 'conversations'),
+          path.join('/synthetic/home', '.gemini', 'antigravity-ide', 'brain'),
+          path.join('/synthetic/home', '.gemini', 'antigravity', 'brain'),
+          path.join('/synthetic/home', '.gemini', 'antigravity-cli', 'brain'),
         ],
-        depth: 0,
+        depth: 3,
+        ignored: expect.any(Function),
       });
     } finally {
       if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
       else process.env.AGENT_HUB_HOME = previousHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+    }
+  });
+
+  it('only watches transcript paths under brain and normalizes Windows separators', () => {
+    const previousHome = process.env.AGENT_HUB_HOME;
+    process.env.AGENT_HUB_HOME = '/synthetic/home';
+    try {
+      const ignored = collectorWatchTargets(new AntigravityCollector()).ignored!;
+      const brain = path.join('/synthetic/home', '.gemini', 'antigravity', 'brain');
+      const allowed = [
+        brain,
+        path.join(brain, 'session-a'),
+        path.join(brain, 'session-a', '.system_generated'),
+        path.join(brain, 'session-a', '.system_generated', 'logs'),
+        path.join(brain, 'session-a', '.system_generated', 'logs', 'transcript.jsonl'),
+      ];
+      for (const candidate of allowed) {
+        expect(ignored(candidate)).toBe(false);
+        expect(ignored(candidate, {} as Stats)).toBe(false);
+      }
+      expect(ignored('\\synthetic\\home\\.gemini\\antigravity\\brain\\session-a\\.system_generated\\logs\\transcript.jsonl')).toBe(false);
+      for (const candidate of [
+        path.join(brain, 'session-a', 'notes.txt'),
+        path.join(brain, 'session-a', '.system_generated', 'logs', '00000001.jsonl'),
+        path.join(brain, 'session-a', '.system_generated', 'logs', 'transcript.jsonl', 'nested'),
+      ]) {
+        expect(ignored(candidate)).toBe(true);
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
+      else process.env.AGENT_HUB_HOME = previousHome;
     }
   });
 });

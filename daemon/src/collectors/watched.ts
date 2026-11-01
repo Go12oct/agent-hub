@@ -1,5 +1,6 @@
 import { watch, type FSWatcher } from 'chokidar';
 import { setImmediate as yieldToEventLoop, setTimeout as delay } from 'node:timers/promises';
+import type { Stats } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { filesModifiedAfter, inferStatus } from './files.js';
 import type { Collector, EmitSession } from './types.js';
@@ -41,7 +42,11 @@ export abstract class WatchedCollector implements Collector {
   protected abstract findFiles(): Promise<string[]>;
   protected abstract parse(file: string): Promise<ParsedWatchedSession | undefined>;
   protected abstract messages(file: string, limit: number): Promise<SessionMessage[]>;
-  protected watchTargets(): { paths: string[]; depth?: number } { return { paths: this.roots() }; }
+  protected watchTargets(): {
+    paths: string[];
+    depth?: number;
+    ignored?: (path: string, stats?: Stats) => boolean;
+  } { return { paths: this.roots() }; }
   protected shouldRetain(_session: AgentSession): boolean { return false; }
   protected async fileCacheKey(_file: string, mtimeMs: number, size: number): Promise<string> {
     return `${mtimeMs}:${size}`;
@@ -56,11 +61,15 @@ export abstract class WatchedCollector implements Collector {
   start(emit: EmitSession): void {
     this.emit = emit;
     this.stopped = false;
-    const { paths, depth } = this.watchTargets();
+    const { paths, depth, ignored } = this.watchTargets();
     this.watcher = watch(paths, {
       ignoreInitial: true,
       usePolling: process.env.AGENT_HUB_USE_POLLING === 'true',
-      ignored: /(^|[\\/])(node_modules|\.git|worktrees)([\\/]|$)/i,
+      ignored: (targetPath, stats) => {
+        const normalizedPath = targetPath.replace(/\\/g, '/');
+        return /(^|\/)(node_modules|\.git|worktrees)(\/|$)/i.test(normalizedPath)
+          || (ignored?.(normalizedPath, stats) ?? false);
+      },
       awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
       ...(depth === undefined ? {} : { depth }),
     });

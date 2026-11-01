@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { Dirent } from 'node:fs';
+import type { Dirent, Stats } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
@@ -14,6 +14,10 @@ function antigravityRoots(): string[] {
     path.join(home, '.gemini', 'antigravity'),
     path.join(home, '.gemini', 'antigravity-cli'),
   ];
+}
+
+function normalizeWatchPath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 export function parseAntigravityRecords(records: Record<string, any>[], id: string, modifiedAt: string, now = Date.now()): {
@@ -79,8 +83,34 @@ export class AntigravityCollector extends WatchedCollector {
   private messagesByFile = new Map<string, SessionMessage[]>();
   private transcriptById = new Map<string, string>();
   protected roots(): string[] { return antigravityRoots(); }
-  protected watchTargets(): { paths: string[]; depth: number } {
-    return { paths: this.roots().map((root) => path.join(root, 'conversations')), depth: 0 };
+  protected watchTargets(): {
+    paths: string[];
+    depth: number;
+    ignored: (path: string, stats?: Stats) => boolean;
+  } {
+    const roots = this.roots();
+    const brainRoots = roots.map((root) => normalizeWatchPath(path.join(root, 'brain')));
+    return {
+      paths: [
+        ...roots.map((root) => path.join(root, 'conversations')),
+        ...roots.map((root) => path.join(root, 'brain')),
+      ],
+      depth: 3,
+      ignored: (targetPath: string, _stats?: Stats) => {
+        const normalizedPath = normalizeWatchPath(targetPath);
+        for (const brainRoot of brainRoots) {
+          if (normalizedPath === brainRoot) return false;
+          if (!normalizedPath.startsWith(`${brainRoot}/`)) continue;
+          const parts = normalizedPath.slice(brainRoot.length + 1).split('/');
+          const allowed = parts.length === 1
+            || (parts.length === 2 && parts[1] === '.system_generated')
+            || (parts.length === 3 && parts[1] === '.system_generated' && parts[2] === 'logs')
+            || (parts.length === 4 && parts[1] === '.system_generated' && parts[2] === 'logs' && parts[3] === 'transcript.jsonl');
+          return !allowed;
+        }
+        return false;
+      },
+    };
   }
   constructor(private days = 7) { super(); }
   protected async findFiles(): Promise<string[]> {

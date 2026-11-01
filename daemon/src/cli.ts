@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { cp, mkdir, copyFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, copyFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createWriteStream, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,7 +32,17 @@ async function enableFileLogging(): Promise<void> {
     : undefined);
   if (!logPath) return;
   await mkdir(path.dirname(logPath), { recursive: true });
-  const stream = createWriteStream(logPath, { flags: 'w' });
+  try {
+    const existingLog = await stat(logPath);
+    if (existingLog.isFile() && existingLog.size > 5 * 1024 * 1024) {
+      const previousLogPath = `${logPath}.1`;
+      await rm(previousLogPath, { force: true });
+      await rename(logPath, previousLogPath);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const stream = createWriteStream(logPath, { flags: 'a' });
   const original = {
     log: console.log.bind(console) as (...args: unknown[]) => void,
     warn: console.warn.bind(console) as (...args: unknown[]) => void,
