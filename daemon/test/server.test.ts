@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHmac } from 'node:crypto';
 import type { AgentSession } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
 import { createHub } from '../src/server';
@@ -35,6 +36,21 @@ function testSession(agent: AgentSession['agent'], nativeId: string): AgentSessi
 }
 
 describe('authenticated HTTP API', () => {
+  it('proves hub identity with a nonce and rejects invalid nonces', async () => {
+    const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
+    try {
+      const nonce = 'pairing_nonce-123';
+      const response = await runtime.app.inject(`/health?nonce=${nonce}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        ok: true,
+        service: 'agent-hub',
+        proof: createHmac('sha256', config.token).update(nonce).digest('hex'),
+      });
+      expect((await runtime.app.inject('/health?nonce=not%20valid')).statusCode).toBe(400);
+    } finally { await runtime.close(); }
+  });
+
   it('rejects missing auth and accepts Bearer and query-token auth', async () => {
     const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
     try {

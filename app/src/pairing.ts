@@ -38,6 +38,31 @@ export function candidateUrls(pairing: PairingDetails): string[] {
   return [...new Set([pairing.url, ...(pairing.urls || [])].map(origin).filter((item): item is string => Boolean(item)))];
 }
 
+export function newNonce(): string {
+  return [...globalThis.crypto.getRandomValues(new Uint8Array(16))]
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export async function verifyHubProof(token: string, nonce: string, proof: unknown): Promise<boolean> {
+  if (typeof proof !== 'string' || !/^[0-9a-f]{64}$/i.test(proof)) return false;
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(token),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = new Uint8Array(await globalThis.crypto.subtle.sign('HMAC', key, new TextEncoder().encode(nonce)));
+  const expected = [...signature].map((value) => value.toString(16).padStart(2, '0')).join('');
+  const actual = proof.toLowerCase();
+  let difference = 0;
+  for (let index = 0; index < expected.length; index++) {
+    difference |= expected.charCodeAt(index) ^ actual.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
 export function mergeKnownUrls(pairing: PairingDetails, discovered: unknown): PairingDetails {
   const extra = Array.isArray(discovered) ? discovered.filter((item): item is string => typeof item === 'string') : [];
   const urls = [...new Set([...(pairing.urls || []), pairing.url, ...extra].map(origin).filter((item): item is string => Boolean(item)))];

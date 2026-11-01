@@ -8,7 +8,10 @@ import remarkGfm from 'remark-gfm';
 import { Capacitor } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 import { agentLabels, type AgentKind, type AgentSession, type SessionMessage, sessionOrder } from '@agent-hub/shared';
-import { candidateUrls, feedGroups, mergeKnownUrls, parsePairingLink, previewText, type PairingDetails } from '../pairing';
+import {
+  candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
+  type PairingDetails,
+} from '../pairing';
 
 const agentOrder: AgentKind[] = ['devin', 'codex', 'claude-code', 'antigravity', 'codex-cloud'];
 const agentInitials: Record<AgentKind, string> = {
@@ -43,10 +46,13 @@ async function savePairing(pairing: PairingDetails): Promise<void> {
   else localStorage.setItem('agent-hub-pairing', value);
 }
 
-async function reachable(url: string, timeout = 4000): Promise<boolean> {
+async function reachable(url: string, token: string, timeout = 4000): Promise<boolean> {
   try {
-    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(timeout) });
-    return response.ok;
+    const nonce = newNonce();
+    const response = await fetch(`${url}/health?nonce=${nonce}`, { signal: AbortSignal.timeout(timeout) });
+    if (!response.ok) return false;
+    const data = await response.json() as { service?: unknown; proof?: unknown };
+    return data.service === 'agent-hub' && await verifyHubProof(token, nonce, data.proof);
   } catch {
     return false;
   }
@@ -88,7 +94,7 @@ export function AgentHub() {
     failingOver.current = true;
     try {
       for (const candidate of candidateUrls(current)) {
-        if (await reachable(candidate)) {
+        if (await reachable(candidate, current.token)) {
           if (candidate !== current.url) {
             const next = { ...current, url: candidate };
             await savePairing(next);
@@ -113,6 +119,7 @@ export function AgentHub() {
       if (JSON.stringify(next.urls) !== JSON.stringify(current.urls)) {
         pairingRef.current = next;
         await savePairing(next);
+        setPairing(next);
       }
     } catch { /* Discovery is best effort. */ }
   }, []);
@@ -307,7 +314,7 @@ function Setup({ onPaired }: { onPaired: (pairing: PairingDetails) => void }) {
     try {
       let working: string | undefined;
       for (const candidate of candidateUrls(pair)) {
-        if (await reachable(candidate, 8000)) { working = candidate; break; }
+        if (await reachable(candidate, pair.token, 8000)) { working = candidate; break; }
       }
       if (!working) throw new Error();
       const next = { ...pair, url: working };

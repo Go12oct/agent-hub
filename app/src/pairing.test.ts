@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { createHmac } from 'node:crypto';
 import type { AgentSession } from '@agent-hub/shared';
-import { candidateUrls, feedGroups, mergeKnownUrls, parsePairingLink, previewText } from './pairing';
+import {
+  candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
+} from './pairing';
 
 describe('pairing links', () => {
   it('parses the agenthub scheme and decodes the URL', () => {
@@ -42,5 +45,17 @@ describe('multiple hub addresses', () => {
   });
   it('strips markdown for previews', () => {
     expect(previewText('Run **this**:\n```sh\nnpm test\n```\nsee [docs](http://x)')).toBe('Run this: [code] see docs');
+  });
+});
+
+describe('hub identity proof', () => {
+  it('verifies a nonce-bound HMAC proof', async () => {
+    const token = 'local-hub-token';
+    const nonce = newNonce();
+    const proof = createHmac('sha256', token).update(nonce).digest('hex');
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(await verifyHubProof(token, nonce, proof)).toBe(true);
+    expect(await verifyHubProof(token, nonce, `${proof.slice(0, -1)}0`)).toBe(false);
+    expect(await verifyHubProof(token, nonce, 'not-a-proof')).toBe(false);
   });
 });

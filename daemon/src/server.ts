@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -83,7 +83,15 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
   }
 
   app.register(cors, { origin: true, credentials: false });
-  app.get('/health', async () => ({ ok: true }));
+  app.get<{ Querystring: { nonce?: string } }>('/health', async (request, reply) => {
+    const nonce = request.query.nonce;
+    if (nonce === undefined) return { ok: true, service: 'agent-hub' };
+    if (typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(nonce)) {
+      return reply.code(400).send({ error: 'Invalid nonce' });
+    }
+    const proof = createHmac('sha256', config.token).update(nonce).digest('hex');
+    return { ok: true, service: 'agent-hub', proof };
+  });
   app.addHook('preHandler', async (request, reply) => {
     if (request.url.startsWith('/api/') && !authorized(request, config.token)) {
       return reply.code(401).send({ error: 'Unauthorized' });

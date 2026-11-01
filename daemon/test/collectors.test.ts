@@ -131,6 +131,7 @@ describe('Claude Code hooks', () => {
     expect(mapClaudeHook('PreToolUse')).toBe('working');
     expect(mapClaudeHook('Notification')).toBe('done');
     expect(mapClaudeHook('Notification', { notification_type: 'permission_prompt' })).toBe('needs_input');
+    expect(mapClaudeHook('Notification', { notification_type: 'elicitation_dialog' })).toBe('needs_input');
     expect(mapClaudeHook('Notification', { notification_type: 'idle_prompt', message: 'Allow access?' })).toBe('done');
     expect(mapClaudeHook('Notification', { message: 'Please approve this action' })).toBe('needs_input');
     expect(mapClaudeHook('Notification', { message: 'The session is idle' })).toBe('done');
@@ -245,6 +246,51 @@ describe('Devin API mapping', () => {
         { role: 'assistant', text: 'The refreshed answer.' },
       ]);
       expect(detailCalls).toBe(2);
+    } finally {
+      collector.stop();
+    }
+  });
+
+  it('supports Devin role-based messages and alternate text fields', () => {
+    expect(parseDevinMessages([
+      { role: 'user', content: 'Question from the older schema' },
+      { role: 'devin', text: 'Answer from the older schema' },
+      { type: 'user_message', message: 'Question from the current schema' },
+      { type: 'devin_message', role: 'user', content: 'Type takes precedence' },
+    ])).toEqual([
+      { role: 'user', text: 'Question from the older schema' },
+      { role: 'assistant', text: 'Answer from the older schema' },
+      { role: 'user', text: 'Question from the current schema' },
+      { role: 'assistant', text: 'Type takes precedence' },
+    ]);
+  });
+
+  it('uses the final non-tool message for the Devin preview and last role', async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (String(input).endsWith('/sessions?limit=50')) {
+        return new Response(JSON.stringify({ sessions: [{
+          session_id: 'preview', status_enum: 'blocked', updated_at: '2025-01-02T12:00:00.000Z',
+        }] }));
+      }
+      return new Response(JSON.stringify({ messages: [
+        { type: 'devin_message', message: 'Ready' },
+        { type: 'user_message', message: 'Run tests' },
+        { type: 'tool_event', message: 'Running suite' },
+      ] }));
+    };
+    class TestDevinCollector extends DevinCollector {
+      refresh(): Promise<void> { return this.poll(); }
+    }
+    const collector = new TestDevinCollector('not-a-real-key', fetcher);
+    const emitted: any[] = [];
+    collector.start((session) => emitted.push(session));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(emitted[0]).toMatchObject({ lastMessage: 'Waiting for your input' });
+      await collector.getMessages('preview', 30);
+      expect(emitted.at(-1)).toMatchObject({ lastMessage: 'Run tests', lastRole: 'user' });
+      await collector.refresh();
+      expect(emitted.at(-1)).toMatchObject({ lastMessage: 'Run tests', lastRole: 'user' });
     } finally {
       collector.stop();
     }

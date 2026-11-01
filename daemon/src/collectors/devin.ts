@@ -8,9 +8,12 @@ export function parseDevinMessages(rows: unknown): SessionMessage[] {
   return rows.flatMap((value): SessionMessage[] => {
     if (!value || typeof value !== 'object') return [];
     const row = value as Record<string, unknown>;
-    const text = typeof row.message === 'string' ? row.message : '';
-    if (!text.trim()) return [];
-    const role = row.type === 'user_message' ? 'user' : row.type === 'devin_message' ? 'assistant' : 'tool';
+    const text = [row.message, row.content, row.text]
+      .find((candidate): candidate is string => typeof candidate === 'string' && Boolean(candidate.trim()));
+    if (!text) return [];
+    const role = row.type === 'user_message' || (row.type !== 'devin_message' && row.role === 'user') ? 'user'
+      : row.type === 'devin_message' || (row.type !== 'user_message' && ['assistant', 'devin'].includes(String(row.role))) ? 'assistant'
+        : 'tool';
     const timestamp = row.timestamp || row.created_at;
     const at = typeof timestamp === 'string' && timestamp ? timestamp : undefined;
     return [{ role, text: text.slice(0, 20_000), ...(at ? { at } : {}) }];
@@ -64,10 +67,10 @@ export class DevinCollector implements Collector {
       if ((this.sessions.get(id)?.updatedAt || '') === updatedAt) {
         this.messagesById.set(nativeId, { updatedAt, messages });
       }
-      const lastAssistantMessage = messages.filter((item) => item.role === 'assistant').at(-1)?.text;
+      const lastMessage = messages.filter((item) => item.role !== 'tool').at(-1);
       const session = this.sessions.get(id);
-      if (session && lastAssistantMessage) {
-        const updated = { ...session, lastMessage: lastAssistantMessage.slice(0, 280) };
+      if (session && lastMessage) {
+        const updated = { ...session, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
         this.sessions.set(id, updated);
         this.emit?.(updated);
       }
@@ -103,15 +106,15 @@ export class DevinCollector implements Collector {
         const cached = this.messagesById.get(id);
         if (cached && cached.updatedAt !== updatedAt) this.messagesById.delete(id);
         const cachedMessages = this.messagesById.get(id);
-        const lastAssistantMessage = cachedMessages?.messages.filter((item) => item.role === 'assistant').at(-1)?.text;
+        const lastMessage = cachedMessages?.messages.filter((item) => item.role !== 'tool').at(-1);
         const project = typeof row.structured_output?.repo === 'string' ? projectName(row.structured_output.repo) : undefined;
         const session: AgentSession = {
           id: `devin:${id}`, agent: 'devin', nativeId: id,
           title: String(row.title || row.name || 'Devin session'),
           ...(project ? { project } : {}),
           status,
-          ...(lastAssistantMessage
-            ? { lastMessage: lastAssistantMessage.slice(0, 280) }
+          ...(lastMessage
+            ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
             : status === 'needs_input' ? { lastMessage: 'Waiting for your input' } : {}),
           canReply: true,
           updatedAt, ...(row.created_at ? { startedAt: String(row.created_at) } : {}),

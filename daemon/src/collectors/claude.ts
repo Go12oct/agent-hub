@@ -26,7 +26,7 @@ export function mapClaudeHook(event: string, payload: ClaudeHookPayload = {}): S
   if (['UserPromptSubmit', 'PreToolUse', 'SubagentStart'].includes(event)) return 'working';
   if (event === 'PermissionRequest') return 'needs_input';
   if (event === 'Notification') {
-    const needsInput = payload.notification_type === 'permission_prompt'
+    const needsInput = ['permission_prompt', 'elicitation_dialog'].includes(payload.notification_type || '')
       || (!payload.notification_type && /permission|approve|allow/i.test(payload.message || ''));
     return needsInput ? 'needs_input' : 'done';
   }
