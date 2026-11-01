@@ -224,10 +224,11 @@ export function AgentHub() {
     return <ChatView key={selectedSession.id} session={selectedSession} pairing={pairing} onBack={() => setSelectedId(undefined)} />;
   }
 
-  const needsCount = sessions.filter((session) => session.status === 'needs_input').length;
-  const workingCount = sessions.filter((session) => session.status === 'working').length;
+  const scoped = selectedAgent === 'all' ? sessions : sessions.filter((session) => session.agent === selectedAgent);
+  const needsCount = scoped.filter((session) => session.status === 'needs_input').length;
+  const workingCount = scoped.filter((session) => session.status === 'working').length;
 
-  const todayCount = sessions.filter((session) => Date.now() - Date.parse(session.updatedAt) < 86_400_000).length;
+  const todayCount = scoped.filter((session) => Date.parse(session.updatedAt) >= new Date().setHours(0, 0, 0, 0)).length;
   const toggleStatus = (value: 'needs_input' | 'working') => setStatusFilter((current) => current === value ? 'all' : value);
 
   return (
@@ -250,7 +251,7 @@ export function AgentHub() {
               </span>
               <h1>Agents</h1>
             </div>
-            <button className="icon-btn glass" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={19} /></button>
+            <button className="icon-btn glass" aria-label="Search" onClick={() => { setStatusFilter('all'); setSearchOpen(true); }}><Search size={19} /></button>
             <button className="icon-btn glass" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button>
           </>
         )}
