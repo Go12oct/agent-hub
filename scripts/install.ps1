@@ -46,4 +46,4 @@ $env:PATH = "$installDir;$env:PATH"
 if (-not $SkipPair) {
   & $shim pair
 }
-Write-Host "Agent Hub installed to $installDir"
+Write-Host "Agent Hub installed to $installDir. Without admin rights, a denied Scheduled Task registration uses the per-user Startup folder."

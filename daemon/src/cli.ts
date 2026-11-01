@@ -9,6 +9,7 @@ import qrcode from 'qrcode-terminal';
 import { loadConfig, setConfigValue, configDirectory } from './config.js';
 import { installClaudeHooks, uninstallClaudeHooks } from './claude-hooks.js';
 import { lanUrls, startServer } from './server.js';
+import { installWindowsService, isDaemonHealthy, uninstallWindowsService } from './windows-service.js';
 
 function runProcess(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -80,11 +81,30 @@ async function run(): Promise<void> {
     const launcher = path.join(installDir, 'start-hidden.vbs');
     const quoteVbs = (value: string) => `"${value.replaceAll('"', '""')}"`;
     await writeFile(launcher, `CreateObject("Wscript.Shell").Run ${quoteVbs(`${quoteVbs(runtime)} ${isStandalone ? 'start' : `${quoteVbs(destination)} start`}`)}, 0, False\r\n`);
-    await runProcess('schtasks.exe', ['/Create', '/F', '/SC', 'ONLOGON', '/TN', 'AgentHub', '/TR', `wscript.exe "${launcher}"`, '/RL', 'LIMITED']);
-    await runProcess('schtasks.exe', ['/Run', '/TN', 'AgentHub']);
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    const startupDirectory = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+    const config = await loadConfig();
+    await installWindowsService({
+      launcher,
+      startupDirectory,
+      port: config.port,
+      runProcess,
+      isHealthy: isDaemonHealthy,
+      startDetached: (command, childArgs) => {
+        const child = spawn(command, childArgs, { detached: true, stdio: 'ignore', windowsHide: true });
+        child.once('error', (error) => console.error(`Could not start Agent Hub: ${(error as Error).message}`));
+        child.unref();
+      },
+      log: (message) => console.log(message),
+    });
   } else if (command === 'uninstall-service') {
     if (process.platform !== 'win32') console.log('On Windows, run agent-hub uninstall-service to remove the AgentHub Scheduled Task.');
-    else await runProcess('schtasks.exe', ['/Delete', '/F', '/TN', 'AgentHub']);
+    else {
+      const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+      const startupDirectory = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+      await uninstallWindowsService(startupDirectory, runProcess);
+      console.log('Removed the AgentHub Scheduled Task and Startup entry, if present.');
+    }
   } else {
     console.log(`Agent Hub CLI
 Usage: agent-hub [start|pair|install-claude-hooks|uninstall-claude-hooks|install-service|uninstall-service|config set <key> <value>]

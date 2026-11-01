@@ -15,11 +15,12 @@ Tailscale.
    .\agent-hub\scripts\install.ps1
    ```
 
-   The installer copies the daemon to `%LOCALAPPDATA%\agent-hub`, registers an
-   `AgentHub` Scheduled Task at logon, installs Claude Code hooks, and prints
-   a QR pairing code. If the release includes a standalone executable, Node.js
-   is not required. For a source checkout, run `npm ci` and
-   `npm run build` first.
+   The installer copies the daemon to `%LOCALAPPDATA%\agent-hub`, tries to
+   register an `AgentHub` Scheduled Task at logon, installs Claude Code hooks,
+   and prints a QR pairing code. If Windows denies Scheduled Task creation
+   without admin rights, Agent Hub uses the current user's Startup folder
+   instead. If the release includes a standalone executable, Node.js is not
+   required. For a source checkout, run `npm ci` and `npm run build` first.
 3. Optional integrations:
 
    ```powershell
