@@ -3,6 +3,25 @@ import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/sha
 import type { Collector, EmitSession } from './types.js';
 import { projectName } from './files.js';
 
+export function parseDevinMessages(rows: unknown): SessionMessage[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.flatMap((value): SessionMessage[] => {
+    if (!value || typeof value !== 'object') return [];
+    const row = value as Record<string, unknown>;
+    const text = typeof row.message === 'string' ? row.message : '';
+    if (!text.trim()) return [];
+    const role = row.type === 'user_message' ? 'user' : row.type === 'devin_message' ? 'assistant' : 'tool';
+    const timestamp = row.timestamp || row.created_at;
+    const at = typeof timestamp === 'string' && timestamp ? timestamp : undefined;
+    return [{ role, text: text.slice(0, 20_000), ...(at ? { at } : {}) }];
+  });
+}
+
+interface CachedDevinMessages {
+  updatedAt: string;
+  messages: SessionMessage[];
+}
+
 export function mapDevinStatus(value: unknown): SessionStatus {
   switch (String(value || '').toLowerCase()) {
     case 'working': case 'running': return 'working';
@@ -21,7 +40,7 @@ export class DevinCollector implements Collector {
   name = 'devin';
   private emit?: EmitSession;
   private timer?: NodeJS.Timeout;
-  private messagesById = new Map<string, SessionMessage[]>();
+  private messagesById = new Map<string, CachedDevinMessages>();
   private sessions = new Map<string, AgentSession>();
   constructor(private apiKey: string, private fetcher: typeof fetch = fetch) {}
   start(emit: EmitSession): void {
@@ -31,25 +50,40 @@ export class DevinCollector implements Collector {
   }
   stop(): void { if (this.timer) clearInterval(this.timer); }
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
+    const id = `devin:${nativeId}`;
+    const updatedAt = this.sessions.get(id)?.updatedAt || '';
     const cached = this.messagesById.get(nativeId);
-    if (cached) return cached.slice(-limit);
+    if (cached?.updatedAt === updatedAt) return cached.messages.slice(-limit);
     try {
       const response = await this.fetcher(`https://api.devin.ai/v1/sessions/${encodeURIComponent(nativeId)}`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
       });
       if (!response.ok) return [];
       const data = await response.json() as any;
-      const rows = Array.isArray(data.messages) ? data.messages : [];
-      const messages = rows.map((row: any) => ({
-        role: row.role === 'user' ? 'user' : row.role === 'tool' ? 'tool' : 'assistant',
-        text: String(row.message || row.content || row.text || '').slice(0, 20_000),
-        at: row.created_at,
-      }));
-      this.messagesById.set(nativeId, messages);
+      const messages = parseDevinMessages(data.messages);
+      if ((this.sessions.get(id)?.updatedAt || '') === updatedAt) {
+        this.messagesById.set(nativeId, { updatedAt, messages });
+      }
+      const lastAssistantMessage = messages.filter((item) => item.role === 'assistant').at(-1)?.text;
+      const session = this.sessions.get(id);
+      if (session && lastAssistantMessage) {
+        const updated = { ...session, lastMessage: lastAssistantMessage.slice(0, 280) };
+        this.sessions.set(id, updated);
+        this.emit?.(updated);
+      }
       return messages.slice(-limit);
     } catch { return []; }
   }
-  private async poll(): Promise<void> {
+  async sendMessage(nativeId: string, text: string): Promise<void> {
+    const response = await this.fetcher(`https://api.devin.ai/v1/sessions/${encodeURIComponent(nativeId)}/message`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    if (!response.ok) throw new Error(`Devin API returned HTTP ${response.status}`);
+    this.messagesById.delete(nativeId);
+  }
+  protected async poll(): Promise<void> {
     try {
       const response = await this.fetcher('https://api.devin.ai/v1/sessions?limit=50', {
         headers: { Authorization: `Bearer ${this.apiKey}` },
@@ -66,12 +100,20 @@ export class DevinCollector implements Collector {
         const status = mapDevinStatus(row.status_enum || row.status);
         active.add(`devin:${id}`);
         const updatedAt = String(row.updated_at || row.created_at || new Date().toISOString());
+        const cached = this.messagesById.get(id);
+        if (cached && cached.updatedAt !== updatedAt) this.messagesById.delete(id);
+        const cachedMessages = this.messagesById.get(id);
+        const lastAssistantMessage = cachedMessages?.messages.filter((item) => item.role === 'assistant').at(-1)?.text;
         const project = typeof row.structured_output?.repo === 'string' ? projectName(row.structured_output.repo) : undefined;
         const session: AgentSession = {
           id: `devin:${id}`, agent: 'devin', nativeId: id,
           title: String(row.title || row.name || 'Devin session'),
           ...(project ? { project } : {}),
-          status, ...(status === 'needs_input' ? { lastMessage: 'Waiting for your input' } : {}),
+          status,
+          ...(lastAssistantMessage
+            ? { lastMessage: lastAssistantMessage.slice(0, 280) }
+            : status === 'needs_input' ? { lastMessage: 'Waiting for your input' } : {}),
+          canReply: true,
           updatedAt, ...(row.created_at ? { startedAt: String(row.created_at) } : {}),
           url: `https://app.devin.ai/sessions/${encodeURIComponent(urlId)}`, machine: os.hostname(),
         };
@@ -81,6 +123,7 @@ export class DevinCollector implements Collector {
       for (const id of this.sessions.keys()) {
         if (active.has(id)) continue;
         this.sessions.delete(id);
+        this.messagesById.delete(id.slice('devin:'.length));
         this.emit?.remove?.(id);
       }
     } catch (error) {

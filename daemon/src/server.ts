@@ -58,7 +58,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
   const app = Fastify({ logger: false });
   const sessions = new Map<string, AgentSession>();
   const claude = new ClaudeCollector(config.lookbackDays);
-  const collectors = options.collectors || [
+  const collectors: Collector[] = options.collectors || [
     new CodexCollector(config.lookbackDays),
     claude,
     new AntigravityCollector(config.lookbackDays),
@@ -104,6 +104,24 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     const limit = Math.max(1, Math.min(100, Number(request.query.limit) || 30));
     const messages: SessionMessage[] = collector ? await collector.getMessages(session.nativeId, limit) : [];
     return messages;
+  });
+  app.post<{ Params: { id: string }; Body: { text?: unknown } }>('/api/sessions/:id/messages', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    const collector = collectors.find((item) => item.name === session.agent);
+    if (!collector?.sendMessage) {
+      return reply.code(405).send({ error: 'Replies are not supported for this agent' });
+    }
+    const text = request.body?.text;
+    if (typeof text !== 'string' || text.length < 1 || text.length > 10_000) {
+      return reply.code(400).send({ error: 'text must be between 1 and 10000 characters' });
+    }
+    try {
+      await collector.sendMessage(session.nativeId, text);
+      return reply.code(204).send();
+    } catch {
+      return reply.code(502).send({ error: 'Failed to send reply' });
+    }
   });
   app.get('/api/pair', async () => ({
     urls: lanUrls(config.port),
@@ -152,6 +170,7 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
 }
 
 export async function startServer(config: HubConfig): Promise<HubRuntime> {
+  if (!config.devinApiKey) console.warn('Devin: no API key; run agent-hub config set devinApiKey <key>');
   const runtime = createHub(config);
   await runtime.app.listen({ host: config.host, port: config.port });
   console.log(`Agent Hub listening on ${config.host}:${config.port}`);

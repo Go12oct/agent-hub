@@ -53,6 +53,7 @@ export class CodexCloudCollector implements Collector {
           id: `codex-cloud:${id}`, agent: 'codex-cloud', nativeId: id,
           title: String(row.title || row.name || 'Codex Cloud task'),
           status: cloudStatus(row.status || row.status_enum),
+          canReply: false,
           updatedAt: String(row.updated_at || row.created_at || new Date().toISOString()),
           ...(row.created_at ? { startedAt: String(row.created_at) } : {}),
           machine: os.hostname(),

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readdir } from 'node:fs/promises';
-import type { AgentSession, SessionMessage } from '@agent-hub/shared';
+import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
 import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
 import { WatchedCollector } from './watched.js';
@@ -29,7 +29,13 @@ async function jsonlFiles(dir: string): Promise<string[]> {
 export function parseCodexRecords(records: Record<string, any>[], fileId = 'unknown', now = Date.now()): {
   session: AgentSession;
   messages: SessionMessage[];
-  statusFacts: { updatedAt: string; lastRole?: AgentSession['lastRole']; completed: boolean; errored: boolean };
+  statusFacts: {
+    updatedAt: string;
+    lastRole?: AgentSession['lastRole'];
+    completed: boolean;
+    errored: boolean;
+    explicitStatus?: SessionStatus;
+  };
 } {
   const sessionMeta = records.find((record) => record.type === 'session_meta')?.payload || {};
   const meta = sessionMeta.meta || sessionMeta;
@@ -41,8 +47,10 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   let lastMessage: string | undefined;
   let completed = false;
   let error = false;
+  let approvalRequested = false;
   let timestamp = meta.timestamp;
   for (const record of records) {
+    if (record.type !== 'event_msg') approvalRequested = false;
     timestamp = record.timestamp || timestamp;
     const payload = record.payload || {};
     if (record.type === 'response_item' && payload.type === 'message') {
@@ -65,7 +73,8 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       }
     }
     if (record.type === 'event_msg') {
-      const kind = payload.type;
+      const kind = String(payload.type || '');
+      approvalRequested = /approval_request$/.test(kind);
       const text = String(payload.message || payload.text || payload.content || '');
       if (kind === 'user_message' || kind === 'agent_message') {
         const role = kind === 'user_message' ? 'user' : 'assistant';
@@ -83,14 +92,17 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     }
   }
   const updatedAt = isoOrNow(timestamp);
-  const statusFacts = { updatedAt, lastRole, completed, errored: error };
+  const explicitStatus: SessionStatus | undefined = approvalRequested ? 'needs_input' : undefined;
+  const statusFacts = { updatedAt, lastRole, completed, errored: error, explicitStatus };
   return {
     session: buildSession({
       agent: 'codex', nativeId, title, cwd,
       branch: typeof sessionMeta.git?.branch === 'string' ? sessionMeta.git.branch
         : typeof meta.git_branch === 'string' ? meta.git_branch : undefined,
-      updatedAt, startedAt: meta.timestamp, status: inferStatus(updatedAt, lastRole, completed, error, now),
-      lastMessage: lastMessage?.slice(-280), lastRole,
+      updatedAt, startedAt: meta.timestamp,
+      status: explicitStatus || inferStatus(updatedAt, lastRole, completed, error, now),
+      lastMessage: explicitStatus ? 'Waiting for approval' : lastMessage?.slice(-280),
+      lastRole,
     }),
     messages: output,
     statusFacts,

@@ -3,13 +3,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { stat } from 'node:fs/promises';
 import { filesModifiedAfter, inferStatus } from './files.js';
 import type { Collector, EmitSession } from './types.js';
-import type { AgentSession, SessionMessage } from '@agent-hub/shared';
+import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
 
 export interface SessionStatusFacts {
   updatedAt: string;
   lastRole?: AgentSession['lastRole'];
   completed: boolean;
   errored: boolean;
+  explicitStatus?: SessionStatus;
 }
 
 export interface ParsedWatchedSession {
@@ -47,7 +48,7 @@ export abstract class WatchedCollector implements Collector {
   protected refreshSession(parsed: ParsedWatchedSession, _mtimeMs: number, now: number): AgentSession {
     const facts = parsed.statusFacts;
     return facts
-      ? { ...parsed.session, status: inferStatus(facts.updatedAt, facts.lastRole, facts.completed, facts.errored, now) }
+      ? { ...parsed.session, status: facts.explicitStatus || inferStatus(facts.updatedAt, facts.lastRole, facts.completed, facts.errored, now) }
       : parsed.session;
   }
 

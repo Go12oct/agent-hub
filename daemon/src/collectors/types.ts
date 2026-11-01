@@ -7,4 +7,5 @@ export interface Collector {
   start(emit: EmitSession): void;
   stop(): void;
   getMessages(nativeId: string, limit: number): Promise<SessionMessage[]>;
+  sendMessage?(nativeId: string, text: string): Promise<void>;
 }

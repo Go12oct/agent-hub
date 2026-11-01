@@ -6,7 +6,7 @@ import type { AgentSession } from '@agent-hub/shared';
 import { CodexCollector, parseCodexRecords } from '../src/collectors/codex';
 import { ClaudeCollector, claudeHookOverride, mapClaudeHook, parseClaudeRecords } from '../src/collectors/claude';
 import { AntigravityCollector, parseAntigravityRecords } from '../src/collectors/antigravity';
-import { mapDevinStatus, DevinCollector } from '../src/collectors/devin';
+import { mapDevinStatus, parseDevinMessages, DevinCollector } from '../src/collectors/devin';
 import { CodexCloudCollector } from '../src/collectors/codex-cloud';
 import { WatchedCollector, type ParsedWatchedSession } from '../src/collectors/watched';
 import type { EmitSession } from '../src/collectors/types';
@@ -22,7 +22,7 @@ class CachedFileCollector extends WatchedCollector {
   async parse(): Promise<ParsedWatchedSession> {
     const updatedAt = new Date().toISOString();
     return {
-      session: { id: 'cached-test:fixture', agent: 'codex', nativeId: 'fixture', title: 'Fixture', status: 'working', updatedAt, machine: 'test' },
+      session: { id: 'cached-test:fixture', agent: 'codex', nativeId: 'fixture', title: 'Fixture', status: 'working', canReply: false, updatedAt, machine: 'test' },
       statusFacts: { updatedAt, lastRole: 'assistant', completed: true, errored: false },
     };
   }
@@ -68,7 +68,7 @@ describe('Codex transcript parser', () => {
     expect(parsed.session.title).toBe('Fix the live feed sorting');
     expect(parsed.session.project).toBe('project');
     expect(parsed.session.branch).toBe('feature/feed');
-    expect(parsed.session.status).toBe('needs_input');
+    expect(parsed.session.status).toBe('done');
     expect(parsed.messages).toHaveLength(2);
   });
   it('treats an explicit aborted turn as an error', () => {
@@ -77,6 +77,22 @@ describe('Codex transcript parser', () => {
       { type: 'event_msg', payload: { type: 'turn_aborted' } },
     ], 'aborted', Date.now());
     expect(parsed.session.status).toBe('error');
+  });
+
+  it('marks a trailing approval request as needing input only until another event arrives', () => {
+    const pending = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'approval' } },
+      { type: 'event_msg', payload: { type: 'exec_approval_request' } },
+    ], 'approval');
+    expect(pending.session.status).toBe('needs_input');
+    expect(pending.session.lastMessage).toBe('Waiting for approval');
+
+    const resolved = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'approval-resolved' } },
+      { type: 'event_msg', payload: { type: 'apply_patch_approval_request' } },
+      { type: 'response_item', payload: { type: 'function_call', name: 'apply_patch' } },
+    ], 'approval-resolved');
+    expect(resolved.session.status).not.toBe('needs_input');
   });
 });
 
@@ -113,7 +129,13 @@ describe('watched collector cache', () => {
 describe('Claude Code hooks', () => {
   it('maps hook events and applies an immediate session status', async () => {
     expect(mapClaudeHook('PreToolUse')).toBe('working');
-    expect(mapClaudeHook('Notification')).toBe('needs_input');
+    expect(mapClaudeHook('Notification')).toBe('done');
+    expect(mapClaudeHook('Notification', { notification_type: 'permission_prompt' })).toBe('needs_input');
+    expect(mapClaudeHook('Notification', { notification_type: 'idle_prompt', message: 'Allow access?' })).toBe('done');
+    expect(mapClaudeHook('Notification', { message: 'Please approve this action' })).toBe('needs_input');
+    expect(mapClaudeHook('Notification', { message: 'The session is idle' })).toBe('done');
+    expect(mapClaudeHook('PermissionRequest')).toBe('needs_input');
+    expect(mapClaudeHook('Stop')).toBe('done');
     expect(mapClaudeHook('StopFailure')).toBe('error');
     expect(mapClaudeHook('SessionEnd')).toBe('done');
     expect(claudeHookOverride(100, 'needs_input', 100)).toBe('needs_input');
@@ -123,6 +145,7 @@ describe('Claude Code hooks', () => {
     collector.start((session) => emitted.push(session));
     await collector.applyHook({ session_id: 'hook-fixture', hook_event_name: 'Notification', cwd: '/tmp/project', message: 'Permission needed' });
     expect(emitted.at(-1).status).toBe('needs_input');
+    expect(emitted.at(-1).lastMessage).toBe('Permission needed');
     await collector.stop();
   });
 
@@ -133,7 +156,7 @@ describe('Claude Code hooks', () => {
     expect(parsed.session.title).toBe('Review the latest changes');
     expect(parsed.session.project).toBe('project');
     expect(parsed.session.branch).toBe('feature/feed');
-    expect(parsed.session.status).toBe('needs_input');
+    expect(parsed.session.status).toBe('done');
     expect(parsed.messages).toHaveLength(2);
   });
 
@@ -176,6 +199,85 @@ describe('Devin API mapping', () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     collector.stop();
     expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'needs_input', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
+  });
+
+  it('maps message types and invalidates cached messages when updated_at changes', async () => {
+    const timestamps = ['2025-01-02T12:00:00.000Z', '2025-01-02T12:00:30.000Z'];
+    let listCalls = 0;
+    let detailCalls = 0;
+    const fetcher: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/sessions?limit=50')) {
+        const updatedAt = timestamps[Math.min(listCalls++, timestamps.length - 1)]!;
+        return new Response(JSON.stringify({ sessions: [{
+          session_id: 'abc', status_enum: 'blocked', title: 'Triage', updated_at: updatedAt,
+        }] }));
+      }
+      detailCalls++;
+      const messages = detailCalls === 1 ? [
+        { type: 'user_message', message: 'Can you check this?', timestamp: '2025-01-02T12:00:01.000Z' },
+        { type: 'devin_message', message: 'I found the issue.', created_at: '2025-01-02T12:00:02.000Z' },
+        { type: 'tool_event', message: 'Ran a check', timestamp: '2025-01-02T12:00:03.000Z' },
+        { type: 'devin_message', message: '' },
+      ] : [{ type: 'devin_message', message: 'The refreshed answer.' }];
+      return new Response(JSON.stringify({ messages }));
+    };
+    class TestDevinCollector extends DevinCollector {
+      refresh(): Promise<void> { return this.poll(); }
+    }
+    const collector = new TestDevinCollector('not-a-real-key', fetcher);
+    const emitted: any[] = [];
+    collector.start((session) => emitted.push(session));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const first = await collector.getMessages('abc', 30);
+      expect(first).toEqual([
+        { role: 'user', text: 'Can you check this?', at: '2025-01-02T12:00:01.000Z' },
+        { role: 'assistant', text: 'I found the issue.', at: '2025-01-02T12:00:02.000Z' },
+        { role: 'tool', text: 'Ran a check', at: '2025-01-02T12:00:03.000Z' },
+      ]);
+      expect((await collector.getMessages('abc', 30))).toEqual(first);
+      expect(detailCalls).toBe(1);
+      expect(emitted.at(-1)).toMatchObject({ canReply: true, lastMessage: 'I found the issue.' });
+
+      await collector.refresh();
+      expect(await collector.getMessages('abc', 30)).toEqual([
+        { role: 'assistant', text: 'The refreshed answer.' },
+      ]);
+      expect(detailCalls).toBe(2);
+    } finally {
+      collector.stop();
+    }
+  });
+
+  it('sends a Devin message to the documented endpoint and invalidates cached messages', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    let detailCalls = 0;
+    const fetcher: typeof fetch = async (input, init) => {
+      const request = { url: String(input), init };
+      requests.push(request);
+      if (init?.method === 'POST') return new Response(null, { status: 204 });
+      detailCalls++;
+      return new Response(JSON.stringify({ messages: [{ type: 'devin_message', message: `reply ${detailCalls}` }] }));
+    };
+    const collector = new DevinCollector('not-a-real-key', fetcher);
+    expect(await collector.getMessages('session-123', 10)).toEqual([{ role: 'assistant', text: 'reply 1' }]);
+    expect(await collector.getMessages('session-123', 10)).toEqual([{ role: 'assistant', text: 'reply 1' }]);
+    expect(detailCalls).toBe(1);
+    await collector.sendMessage('session-123', 'Please add a test');
+    expect(await collector.getMessages('session-123', 10)).toEqual([{ role: 'assistant', text: 'reply 2' }]);
+    expect(detailCalls).toBe(2);
+    const post = requests.find((request) => request.init?.method === 'POST');
+    expect(post?.url).toBe('https://api.devin.ai/v1/sessions/session-123/message');
+    expect(post?.init).toMatchObject({
+      method: 'POST',
+      headers: { Authorization: 'Bearer not-a-real-key', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'Please add a test' }),
+    });
+  });
+
+  it('drops empty Devin message text', () => {
+    expect(parseDevinMessages([{ type: 'devin_message', message: ' ' }])).toEqual([]);
   });
 });
 

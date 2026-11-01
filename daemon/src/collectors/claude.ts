@@ -13,14 +13,6 @@ export function claudeTitle(text: string): string | undefined {
   return clean.slice(0, 180);
 }
 
-export function mapClaudeHook(event: string): SessionStatus | undefined {
-  if (['UserPromptSubmit', 'PreToolUse', 'SubagentStart'].includes(event)) return 'working';
-  if (['Notification', 'Stop', 'PermissionRequest'].includes(event)) return 'needs_input';
-  if (event === 'StopFailure') return 'error';
-  if (event === 'SessionEnd') return 'done';
-  return undefined;
-}
-
 export interface ClaudeHookPayload {
   session_id?: string;
   hook_event_name?: string;
@@ -28,6 +20,20 @@ export interface ClaudeHookPayload {
   transcript_path?: string;
   message?: string;
   notification_type?: string;
+}
+
+export function mapClaudeHook(event: string, payload: ClaudeHookPayload = {}): SessionStatus | undefined {
+  if (['UserPromptSubmit', 'PreToolUse', 'SubagentStart'].includes(event)) return 'working';
+  if (event === 'PermissionRequest') return 'needs_input';
+  if (event === 'Notification') {
+    const needsInput = payload.notification_type === 'permission_prompt'
+      || (!payload.notification_type && /permission|approve|allow/i.test(payload.message || ''));
+    return needsInput ? 'needs_input' : 'done';
+  }
+  if (event === 'Stop') return 'done';
+  if (event === 'StopFailure') return 'error';
+  if (event === 'SessionEnd') return 'done';
+  return undefined;
 }
 
 export function claudeHookOverride(fileModifiedAt: number, status: SessionStatus, hookAt: number): SessionStatus | undefined {
@@ -104,18 +110,24 @@ export class ClaudeCollector extends WatchedCollector {
   }
   async applyHook(payload: ClaudeHookPayload, emit: EmitSession | undefined = this.emit): Promise<void> {
     if (!payload.session_id || !payload.hook_event_name) return;
-    const status = mapClaudeHook(payload.hook_event_name);
+    const status = mapClaudeHook(payload.hook_event_name, payload);
     if (!status) return;
     this.hookOverrides.set(payload.session_id, { status, at: Date.now(), message: payload.message });
     const existing = this.sessions.get(`claude-code:${payload.session_id}`);
     if (existing) {
-      const updated = { ...existing, status, updatedAt: new Date().toISOString(), ...(payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}) };
+      const updated = {
+        ...existing,
+        status,
+        updatedAt: new Date().toISOString(),
+        ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
+      };
       this.sessions.set(existing.id, updated);
       emit?.(updated);
     } else if (payload.cwd) {
       const updated = buildSession({
         agent: 'claude-code', nativeId: payload.session_id, cwd: payload.cwd,
         title: payload.message || 'Claude Code session', status, updatedAt: new Date().toISOString(),
+        ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
       });
       this.sessions.set(updated.id, updated);
       emit?.(updated);

@@ -11,15 +11,95 @@ class FakeCollector implements Collector {
   async getMessages(): Promise<[]> { return []; }
 }
 
+class ReplyCollector extends FakeCollector {
+  name = 'devin';
+  sent: Array<{ nativeId: string; text: string }> = [];
+  async sendMessage(nativeId: string, text: string): Promise<void> {
+    this.sent.push({ nativeId, text });
+  }
+}
+
+class FailingReplyCollector extends ReplyCollector {
+  async sendMessage(_nativeId: string, _text: string): Promise<void> {
+    throw new Error('Devin unavailable');
+  }
+}
+
 const config = { token: 'test-token', port: 4747, host: '127.0.0.1', lookbackDays: 7, codexCloud: { enabled: false } };
+
+function testSession(agent: AgentSession['agent'], nativeId: string): AgentSession {
+  return {
+    id: `${agent}:${nativeId}`, agent, nativeId, title: 'Test', status: 'working',
+    canReply: agent === 'devin', updatedAt: new Date().toISOString(), machine: 'test',
+  };
+}
 
 describe('authenticated HTTP API', () => {
   it('rejects missing auth and accepts Bearer and query-token auth', async () => {
     const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
     try {
       expect((await runtime.app.inject('/api/sessions')).statusCode).toBe(401);
+      expect((await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/missing/messages', payload: { text: 'Reply' },
+      })).statusCode).toBe(401);
       expect((await runtime.app.inject({ url: '/api/sessions', headers: { authorization: 'Bearer test-token' } })).statusCode).toBe(200);
       expect((await runtime.app.inject('/api/sessions?token=test-token')).statusCode).toBe(200);
+    } finally { await runtime.close(); }
+  });
+
+  it('returns 404 for unknown sessions and 405 when replies are unsupported', async () => {
+    const collector = new FakeCollector();
+    const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });
+    collector.emit?.(testSession('codex', 'existing'));
+    try {
+      const unknown = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/codex:unknown/messages',
+        headers: { authorization: 'Bearer test-token' }, payload: { text: 'Reply' },
+      });
+      const unsupported = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/codex:existing/messages',
+        headers: { authorization: 'Bearer test-token' }, payload: { text: 'Reply' },
+      });
+      expect(unknown.statusCode).toBe(404);
+      expect(unsupported.statusCode).toBe(405);
+      expect(unsupported.json()).toEqual({ error: 'Replies are not supported for this agent' });
+    } finally { await runtime.close(); }
+  });
+
+  it('sends a supported reply and returns 204', async () => {
+    const collector = new ReplyCollector();
+    const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });
+    collector.emit?.(testSession('devin', 'session-123'));
+    try {
+      const response = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/devin:session-123/messages',
+        headers: { authorization: 'Bearer test-token' }, payload: { text: 'Please add a test' },
+      });
+      expect(response.statusCode).toBe(204);
+      expect(collector.sent).toEqual([{ nativeId: 'session-123', text: 'Please add a test' }]);
+    } finally { await runtime.close(); }
+  });
+
+  it('returns 400 for invalid reply text and 502 for an upstream failure', async () => {
+    const collector = new FailingReplyCollector();
+    const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });
+    collector.emit?.(testSession('devin', 'session-123'));
+    try {
+      const invalid = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/devin:session-123/messages',
+        headers: { authorization: 'Bearer test-token' }, payload: { text: '' },
+      });
+      const oversized = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/devin:session-123/messages',
+        headers: { authorization: 'Bearer test-token' }, payload: { text: 'x'.repeat(10_001) },
+      });
+      const failed = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/devin:session-123/messages',
+        headers: { authorization: 'Bearer test-token' }, payload: { text: 'Reply' },
+      });
+      expect(invalid.statusCode).toBe(400);
+      expect(oversized.statusCode).toBe(400);
+      expect(failed.statusCode).toBe(502);
     } finally { await runtime.close(); }
   });
 
@@ -79,7 +159,7 @@ describe('authenticated HTTP API', () => {
       expect(initial).toContain('event: snapshot');
       const session: AgentSession = {
         id: 'codex:test', agent: 'codex', nativeId: 'test', title: 'Test', status: 'working',
-        updatedAt: new Date().toISOString(), machine: 'test',
+        canReply: false, updatedAt: new Date().toISOString(), machine: 'test',
       };
       collector.emit?.(session);
       const update = decoder.decode((await reader.read()).value);
