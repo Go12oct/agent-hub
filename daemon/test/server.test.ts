@@ -198,6 +198,32 @@ describe('authenticated HTTP API', () => {
     } finally { await runtime.close(); }
   });
 
+  it('hides a reply failure after newer collector activity', async () => {
+    const collector = new FakeCollector();
+    const replyRunner = new FakeLocalReplyRunner();
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.({
+      ...testSession('codex', 'session-123'),
+      updatedAt: '2025-01-02T00:00:00.000Z',
+    });
+    replyRunner.failures.set('codex:session-123', {
+      error: 'Codex stopped with exit code 7',
+      at: '2025-01-01T00:00:00.000Z',
+    });
+    try {
+      const response = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(response.json()).toHaveLength(1);
+      expect(response.json()[0]).not.toHaveProperty('replyError');
+    } finally { await runtime.close(); }
+  });
+
   it('returns 400 for invalid reply text and 502 for an upstream failure', async () => {
     const collector = new FailingReplyCollector();
     const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });

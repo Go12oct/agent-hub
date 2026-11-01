@@ -220,36 +220,29 @@ export class LocalReplyRunner implements ReplyRunner {
     let stderrTail = '';
     let startupSettled = false;
     let finished = false;
-    let startupTimer: NodeJS.Timeout;
-    let finishRun: ((code: number | null, error?: Error, failureOverride?: string) => void) | undefined;
-    const timeout = setTimeout(() => {
-      if (finished) return;
-      const error = new Error('Timed out after 20 minutes');
-      this.kill(child);
-      finishRun?.(null, error, error.message);
-    }, this.timeoutMs);
-    this.active.set(session.id, { child, timeout });
-    this.notify(session.id);
-    console.log(`Local reply started: ${session.agent} ${session.id}`);
+    let pendingFailure: string | undefined;
 
     return new Promise<void>((resolve, reject) => {
-      const finish = (code: number | null, error?: Error, failureOverride?: string) => {
+      let startupTimer: NodeJS.Timeout;
+      let timeout: NodeJS.Timeout;
+      let forceKillTimer: NodeJS.Timeout | undefined;
+      let spawned = child.pid !== undefined;
+      const finish = (code: number | null, error?: Error) => {
         if (finished) return;
         finished = true;
         clearTimeout(startupTimer);
         clearTimeout(timeout);
+        if (forceKillTimer) clearTimeout(forceKillTimer);
         if (this.active.get(session.id)?.child === child) this.active.delete(session.id);
-        const failed = Boolean(error) || code !== 0;
-        const failureMessage = failureOverride
-          || stderrTail
-          || (error
-            ? error.message || `Failed to start ${agentLabels[agent]}`
-            : `${agentLabels[agent]} stopped with exit code ${code ?? 'unknown'}`);
+        const failed = Boolean(error || pendingFailure) || code !== 0;
+        const failureMessage = error
+          ? stderrTail || error.message || `Failed to start ${agentLabels[agent]}`
+          : pendingFailure || stderrTail || `${agentLabels[agent]} stopped with exit code ${code ?? 'unknown'}`;
         if (startupSettled && failed) {
           this.lastFailure.set(session.id, { error: failureMessage, at: new Date().toISOString() });
         }
         this.notify(session.id);
-        console.log(`Local reply exited: ${session.agent} ${session.id} (${error ? 'error' : code ?? 'unknown'})`);
+        console.log(`Local reply exited: ${session.agent} ${session.id} (${failed ? 'error' : code ?? 'unknown'})`);
 
         if (!startupSettled) {
           startupSettled = true;
@@ -257,8 +250,25 @@ export class LocalReplyRunner implements ReplyRunner {
           else resolve();
         }
       };
-      finishRun = finish;
 
+      timeout = setTimeout(() => {
+        if (finished) return;
+        pendingFailure = 'Timed out after 20 minutes';
+        this.kill(child);
+        if (!finished) {
+          forceKillTimer = setTimeout(() => {
+            if (finished) return;
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              return;
+            }
+          }, 10_000);
+        }
+      }, this.timeoutMs);
+      this.active.set(session.id, { child, timeout });
+      this.notify(session.id);
+      console.log(`Local reply started: ${session.agent} ${session.id}`);
       startupTimer = setTimeout(() => {
         if (startupSettled) return;
         startupSettled = true;
@@ -268,15 +278,21 @@ export class LocalReplyRunner implements ReplyRunner {
       child.stderr?.on('data', (chunk: Buffer | string) => {
         stderrTail = `${stderrTail}${chunk.toString()}`.slice(-500);
       });
-      child.once('error', (error) => finish(null, error));
+      child.once('spawn', () => { spawned = true; });
+      child.once('error', (error) => {
+        if (!spawned) finish(null, error);
+        else pendingFailure ||= error.message || 'Local reply process error';
+      });
       child.once('close', (code) => finish(code));
-      child.stdin?.on('error', (error) => finish(null, error));
+      child.stdin?.on('error', (error) => {
+        pendingFailure ||= error.message || 'Failed to write to CLI stdin';
+      });
 
       try {
         if (command.stdin === undefined) child.stdin?.end();
         else child.stdin?.end(command.stdin);
       } catch (error) {
-        finish(null, error instanceof Error ? error : new Error(String(error)));
+        pendingFailure ||= error instanceof Error ? error.message : String(error);
       }
     });
   }

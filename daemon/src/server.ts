@@ -84,14 +84,17 @@ export function createHub(
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
   const eventClients = new Set<{ write: (data: string) => void }>();
 
-  const present = (session: AgentSession): AgentSession => ({
-    ...session,
-    canReply: session.agent === 'devin'
-      ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
-      : isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent)),
-    replyError: replyRunner?.failure(session.id)?.error,
-    status: replyRunner?.isRunning(session.id) ? 'working' : session.status,
-  });
+  const present = (session: AgentSession): AgentSession => {
+    const failure = replyRunner?.failure(session.id);
+    return {
+      ...session,
+      canReply: session.agent === 'devin'
+        ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
+        : isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent)),
+      replyError: failure && Date.parse(failure.at) >= Date.parse(session.updatedAt) ? failure.error : undefined,
+      status: replyRunner?.isRunning(session.id) ? 'working' : session.status,
+    };
+  };
   const broadcast = (session: AgentSession) => {
     const data = JSON.stringify(present(session));
     for (const client of eventClients) client.write(`event: upsert\ndata: ${data}\n\n`);

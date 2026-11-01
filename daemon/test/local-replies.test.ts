@@ -204,6 +204,11 @@ describe('LocalReplyRunner', () => {
     expect((child.stdin as PassThrough).writableEnded).toBe(true);
 
     (child.stdin as PassThrough).emit('error', new Error('EPIPE'));
+    expect(runner.isRunning(session.id)).toBe(true);
+    expect(runner.failure(session.id)).toBeUndefined();
+
+    child.emit('close', 0);
+    expect(runner.isRunning(session.id)).toBe(false);
     expect(runner.failure(session.id)).toEqual({
       error: 'EPIPE',
       at: expect.any(String),
@@ -222,7 +227,15 @@ describe('LocalReplyRunner', () => {
     await sending;
     await vi.advanceTimersByTimeAsync(10);
 
-    expect(child.kill).toHaveBeenCalledOnce();
+    expect(runner.isRunning(session.id)).toBe(true);
+    expect(runner.failure(session.id)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(runner.isRunning(session.id)).toBe(true);
+    expect(runner.failure(session.id)).toBeUndefined();
+
+    child.emit('close', null);
+    expect(runner.isRunning(session.id)).toBe(false);
     expect(runner.failure(session.id)).toEqual({
       error: 'Timed out after 20 minutes',
       at: expect.any(String),
