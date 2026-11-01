@@ -86,12 +86,35 @@ describe('Codex transcript parser', () => {
     expect(parsed.session.status).toBe('done');
     expect(parsed.messages).toHaveLength(2);
   });
-  it('treats an explicit aborted turn as an error', () => {
-    const parsed = parseCodexRecords([
-      { type: 'session_meta', payload: { id: 'aborted' } },
-      { type: 'event_msg', payload: { type: 'turn_aborted' } },
-    ], 'aborted', Date.now());
-    expect(parsed.session.status).toBe('error');
+  it('uses the latest Codex activity to determine whether a turn is errored or done', () => {
+    const parse = (events: Record<string, any>[]) => parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'latest-state' } },
+      ...events,
+    ], 'latest-state', Date.now());
+    const event = (type: string, payload: Record<string, unknown> = {}) => ({ type: 'event_msg', payload: { type, ...payload } });
+
+    expect(parse([
+      event('turn_aborted'),
+      event('task_started'),
+      event('agent_message', { message: 'Continuing' }),
+      event('task_complete'),
+    ]).session.status).toBe('done');
+    expect(parse([
+      event('task_started'),
+      event('user_message', { message: 'Please try again' }),
+      event('error'),
+    ]).session.status).toBe('error');
+    expect(parse([
+      event('task_started'),
+      event('error'),
+      event('task_started'),
+      event('agent_message', { message: 'Recovered' }),
+      event('task_complete'),
+    ]).session.status).toBe('done');
+    expect(parse([
+      event('user_message', { message: 'Stop here' }),
+      event('turn_aborted'),
+    ]).session.status).toBe('done');
   });
 
   it('marks a trailing approval request as needing input only until another event arrives', () => {
@@ -300,6 +323,24 @@ describe('Antigravity transcript parser', () => {
     expect(result.session.project).toBe('project');
     expect(result.session.status).toBe('working');
     expect(result.messages).toHaveLength(2);
+  });
+
+  it('only reports errors that are not superseded by later messages or completion', () => {
+    const modifiedAt = new Date().toISOString();
+    const parse = (records: Record<string, any>[]) => parseAntigravityRecords(records, 'anti-state', modifiedAt, Date.now());
+
+    expect(parse([
+      { type: 'error', text: 'Earlier failure' },
+      { type: 'assistant', role: 'assistant', text: 'Finished', turnComplete: true },
+    ]).session.status).toBe('done');
+    expect(parse([
+      { type: 'error', text: 'Final failure' },
+    ]).session.status).toBe('error');
+    const aborted = parse([
+      { type: 'turn_aborted' },
+    ]);
+    expect(aborted.statusFacts.errored).toBe(false);
+    expect(aborted.session.status).not.toBe('error');
   });
 });
 

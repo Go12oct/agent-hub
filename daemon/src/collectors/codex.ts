@@ -46,15 +46,18 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   let lastRole: AgentSession['lastRole'];
   let lastMessage: string | undefined;
   let completed = false;
-  let error = false;
+  let lastErrorIndex = -1;
+  let lastActivityIndex = -1;
   let approvalRequested = false;
   let timestamp = meta.timestamp;
-  for (const record of records) {
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
     if (record.type !== 'event_msg') approvalRequested = false;
     timestamp = record.timestamp || timestamp;
     const payload = record.payload || {};
     if (record.type === 'response_item' && payload.type === 'message') {
       const role = payload.role;
+      if (role === 'user' || role === 'assistant') lastActivityIndex = index;
       const text = textFromContent(payload.content);
       if (!text) continue;
       if (role === 'user') {
@@ -78,6 +81,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       const text = String(payload.message || payload.text || payload.content || '');
       if (kind === 'user_message' || kind === 'agent_message') {
         const role = kind === 'user_message' ? 'user' : 'assistant';
+        lastActivityIndex = index;
         if (text) output.push(message(text, role, record.timestamp));
         if (role === 'user') {
           if (!title && text && !/<environment_context>|<instructions>/i.test(text)) title = text.trim().slice(0, 180);
@@ -88,9 +92,16 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       } else if (kind === 'task_complete' || kind === 'turn_complete') {
         completed = true;
         lastRole = 'assistant';
-      } else if (kind === 'turn_aborted' || kind === 'error') error = true;
+        lastActivityIndex = index;
+      } else if (kind === 'task_started') {
+        completed = false;
+        lastActivityIndex = index;
+      } else if (kind === 'turn_aborted') {
+        completed = true;
+      } else if (kind === 'error') lastErrorIndex = index;
     }
   }
+  const error = lastErrorIndex > lastActivityIndex;
   const updatedAt = isoOrNow(timestamp);
   const explicitStatus: SessionStatus | undefined = approvalRequested ? 'needs_input' : undefined;
   const statusFacts = { updatedAt, lastRole, completed, errored: error, explicitStatus };

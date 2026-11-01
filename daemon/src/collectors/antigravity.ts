@@ -31,10 +31,12 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
   let lastRole: AgentSession['lastRole'];
   let lastMessage: string | undefined;
   let complete = false;
-  let error = false;
+  let lastErrorIndex = -1;
+  let lastActivityIndex = -1;
   let updatedAt = modifiedAt;
   const messages: SessionMessage[] = [];
-  for (const row of records) {
+  for (let index = 0; index < records.length; index++) {
+    const row = records[index]!;
     const kind = String(row.type || row.role || row.event || '').toLowerCase();
     let text = typeof row.text === 'string' ? row.text : textFromContent(row.content ?? row.message?.content) || row.message?.text;
     if (typeof text === 'string') {
@@ -55,15 +57,20 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       if (role === 'user' && !title) title = text.trim().slice(0, 180);
       lastRole = role;
       lastMessage = text;
+      if (role === 'user' || role === 'assistant') lastActivityIndex = index;
       complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
         || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
     }
-    if (/error|abort|failed/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) error = true;
+    if (/error|fail/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) {
+      lastErrorIndex = index;
+    }
     if (/turn[_-]?complete|task[_-]?complete/.test(kind)) {
       complete = true;
       lastRole = 'assistant';
+      lastActivityIndex = index;
     }
   }
+  const error = lastErrorIndex > lastActivityIndex;
   const session = buildSession({
     agent: 'antigravity',
     nativeId: id,
