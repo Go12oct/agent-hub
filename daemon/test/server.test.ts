@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import type { AgentSession } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
-import { ReplyBusyError, type ReplyAgent, type ReplyRunner } from '../src/local-replies';
+import { ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner } from '../src/local-replies';
 import { createHub } from '../src/server';
 
 class FakeCollector implements Collector {
@@ -30,11 +30,16 @@ class FailingReplyCollector extends ReplyCollector {
 class FakeLocalReplyRunner implements ReplyRunner {
   onChange?: (sessionId: string) => void;
   running = new Set<string>();
+  failures = new Map<string, { error: string; at: string }>();
   sent: Array<{ sessionId: string; text: string }> = [];
+  sendError?: Error;
   supports(agent: ReplyAgent): boolean { return agent === 'codex'; }
   isRunning(sessionId: string): boolean { return this.running.has(sessionId); }
+  failure(sessionId: string): { error: string; at: string } | undefined { return this.failures.get(sessionId); }
   async send(session: AgentSession, text: string): Promise<void> {
     if (this.running.has(session.id)) throw new ReplyBusyError();
+    if (this.sendError) throw this.sendError;
+    this.failures.delete(session.id);
     this.sent.push({ sessionId: session.id, text });
     this.running.add(session.id);
     this.onChange?.(session.id);
@@ -154,6 +159,42 @@ describe('authenticated HTTP API', () => {
       });
       expect(busy.statusCode).toBe(409);
       expect(busy.json()).toEqual({ error: 'That agent is still working on your last message' });
+
+      replyRunner.running.delete('codex:session-123');
+      replyRunner.failures.set('codex:session-123', {
+        error: 'Codex stopped with exit code 7',
+        at: new Date().toISOString(),
+      });
+      replyRunner.onChange?.('codex:session-123');
+      const failedSessions = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(failedSessions.json()).toEqual([
+        expect.objectContaining({ id: 'codex:session-123', replyError: 'Codex stopped with exit code 7' }),
+      ]);
+    } finally { await runtime.close(); }
+  });
+
+  it('returns the project-folder error from a local reply failure', async () => {
+    const collector = new FakeCollector();
+    const replyRunner = new FakeLocalReplyRunner();
+    replyRunner.sendError = new ReplyFailedError('', "Couldn't find this chat's project folder");
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.(testSession('codex', 'session-123'));
+    try {
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/codex:session-123/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Run the tests' },
+      });
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Couldn't find this chat's project folder" });
     } finally { await runtime.close(); }
   });
 

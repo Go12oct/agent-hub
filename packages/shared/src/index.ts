@@ -12,6 +12,7 @@ export interface AgentSession {
   branch?: string;
   status: SessionStatus;
   canReply: boolean;
+  replyError?: string;
   lastMessage?: string;
   lastRole?: MessageRole;
   startedAt?: string;

@@ -89,6 +89,7 @@ export function createHub(
     canReply: session.agent === 'devin'
       ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
       : isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent)),
+    replyError: replyRunner?.failure(session.id)?.error,
     status: replyRunner?.isRunning(session.id) ? 'working' : session.status,
   });
   const broadcast = (session: AgentSession) => {
@@ -178,8 +179,8 @@ export function createHub(
         return reply.code(409).send({ error: 'That agent is still working on your last message' });
       }
       if (isDevinReply) return reply.code(502).send({ error: 'Failed to send reply' });
-      const tail = error instanceof ReplyFailedError ? error.stderrTail : '';
-      return reply.code(502).send({ error: tail || `Failed to start ${agentLabels[session.agent]}` });
+      const message = error instanceof ReplyFailedError ? error.stderrTail || error.message : '';
+      return reply.code(502).send({ error: message || `Failed to start ${agentLabels[session.agent]}` });
     }
   });
   app.get('/api/pair', async () => ({

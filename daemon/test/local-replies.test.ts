@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess, spawn } from 'node:child_process';
+import os from 'node:os';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
@@ -28,11 +29,12 @@ const commandCases: Array<{
 
 describe('buildReplyCommand', () => {
   it.each(commandCases)('$agent on $platform using $executable', ({ agent, platform, executable, shell }) => {
-    const command = buildReplyCommand(agent, 'session_123-abc', text, undefined, executable, platform);
+    const command = buildReplyCommand(agent, 'session_123-abc', text, process.cwd(), executable, platform);
     const shellShim = shell;
     const resumeFlag = agent === 'claude-code' ? '--resume' : agent === 'antigravity' ? '--conversation' : undefined;
     expect(command.command).toBe(shellShim ? `"${executable}"` : executable);
     expect(command.shell).toBe(shell);
+    expect(command.cwd).toBe(process.cwd());
     if (agent === 'codex') {
       expect(command.args).toEqual(['exec', 'resume', 'session_123-abc', '-']);
       expect(command.stdin).toBe(text);
@@ -46,6 +48,28 @@ describe('buildReplyCommand', () => {
   it('rejects an unsafe native ID', () => {
     expect(() => buildReplyCommand('codex', 'abc;rm -rf', text, undefined, 'codex', 'linux')).toThrow('Invalid session ID');
   });
+
+  it('requires an existing project directory except for Antigravity', () => {
+    expect(buildReplyCommand('antigravity', 'session_123', text, undefined, 'agy', 'linux').cwd).toBe(os.homedir());
+    expect(() => buildReplyCommand('codex', 'session_123', text, undefined, 'codex', 'linux'))
+      .toThrow("Couldn't find this chat's project folder");
+    expect(() => buildReplyCommand('claude-code', 'session_123', text, undefined, 'claude', 'linux'))
+      .toThrow("Couldn't find this chat's project folder");
+
+    const missing = '/agent-hub-missing-project';
+    expect(() => buildReplyCommand('antigravity', 'session_123', text, missing, 'agy', 'linux'))
+      .toThrow(`Project folder not found: ${missing}`);
+    expect(() => buildReplyCommand('codex', 'session_123', text, process.execPath, 'codex', 'linux'))
+      .toThrow(`Project folder not found: ${process.execPath}`);
+  });
+
+  it.each(['C:\\bad&path\\codex.cmd', 'C:\\bad\npath\\codex.cmd'])(
+    'rejects unsafe shell shim paths',
+    (executable) => {
+      expect(() => buildReplyCommand('codex', 'session_123', text, process.cwd(), executable, 'win32'))
+        .toThrow('Unsafe CLI path');
+    },
+  );
 });
 
 function fakeChild(): ChildProcess {
@@ -62,19 +86,21 @@ const session: AgentSession = {
   agent: 'codex',
   nativeId: 'session_123',
   title: 'Test',
+  cwd: process.cwd(),
   status: 'done',
   canReply: false,
   updatedAt: new Date().toISOString(),
   machine: 'test',
 };
 
-function createRunner(child: ChildProcess) {
+function createRunner(child: ChildProcess, options: { startupMs?: number; timeoutMs?: number } = {}) {
   const spawnProcess = vi.fn(() => child);
   const runner = new LocalReplyRunner({
     commands: { codex: 'codex' },
     resolve: async () => undefined,
     spawn: spawnProcess as unknown as typeof spawn,
-    timeoutMs: 60_000,
+    startupMs: options.startupMs,
+    timeoutMs: options.timeoutMs ?? 60_000,
   });
   return { runner, spawnProcess };
 }
@@ -132,5 +158,74 @@ describe('LocalReplyRunner', () => {
     child.emit('close', 0);
     expect(runner.isRunning(session.id)).toBe(false);
     expect(changes).toEqual([session.id, session.id]);
+  });
+
+  it('records a late failure and clears it when a new reply starts', async () => {
+    vi.useFakeTimers();
+    const firstChild = fakeChild();
+    const secondChild = fakeChild();
+    const children = [firstChild, secondChild];
+    const runner = new LocalReplyRunner({
+      commands: { codex: 'codex' },
+      resolve: async () => undefined,
+      spawn: vi.fn(() => children.shift()!) as unknown as typeof spawn,
+      startupMs: 10,
+      timeoutMs: 60_000,
+    });
+    await runner.init();
+
+    const first = runner.send(session, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await first;
+    firstChild.emit('close', 7);
+    expect(runner.failure(session.id)).toEqual({
+      error: 'Codex stopped with exit code 7',
+      at: expect.any(String),
+    });
+
+    const second = runner.send(session, text);
+    await Promise.resolve();
+    expect(runner.failure(session.id)).toBeUndefined();
+    secondChild.emit('close', 0);
+    await second;
+  });
+
+  it('handles stdin EPIPE errors and records a late failure', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const { runner } = createRunner(child, { startupMs: 10 });
+    await runner.init();
+
+    const sending = runner.send(session, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await sending;
+    expect((child.stdin as PassThrough).writableEnded).toBe(true);
+
+    (child.stdin as PassThrough).emit('error', new Error('EPIPE'));
+    expect(runner.failure(session.id)).toEqual({
+      error: 'EPIPE',
+      at: expect.any(String),
+    });
+  });
+
+  it('records a timeout after the startup window', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const { runner } = createRunner(child, { startupMs: 10, timeoutMs: 20 });
+    await runner.init();
+
+    const sending = runner.send(session, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await sending;
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(runner.failure(session.id)).toEqual({
+      error: 'Timed out after 20 minutes',
+      at: expect.any(String),
+    });
   });
 });

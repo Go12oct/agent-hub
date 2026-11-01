@@ -485,7 +485,8 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
     if (!text || sending) return;
     setSending(true);
     setSendError('');
-    setMessages((existing) => [...existing, { role: 'user', text, at: new Date().toISOString() }]);
+    const optimisticMessage = { role: 'user' as const, text, at: new Date().toISOString() };
+    setMessages((existing) => [...existing, optimisticMessage]);
     stick.current = true;
     try {
       const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/messages`, {
@@ -495,12 +496,14 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: unknown };
+        setMessages((existing) => existing.filter((message) => message !== optimisticMessage));
         setSendError(typeof body.error === 'string' ? body.error : 'Message not sent. Try again.');
         return;
       }
       setDraft('');
       setTimeout(() => void load(), 2500);
     } catch {
+      setMessages((existing) => existing.filter((message) => message !== optimisticMessage));
       setSendError('Message not sent. Try again.');
     } finally { setSending(false); }
   }
@@ -547,7 +550,9 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
 
       {canReply ? (
         <footer className="composer">
-          {sendError && <div className="error small">{sendError}</div>}
+          {(sendError || (!sending && session.replyError)) && (
+            <div className="error small">{sendError || session.replyError}</div>
+          )}
           <div className="composer-box">
             <textarea value={draft} rows={1} placeholder={`Message ${agentLabels[session.agent]}`}
               onChange={(event) => { setDraft(event.target.value); event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`; }} />
