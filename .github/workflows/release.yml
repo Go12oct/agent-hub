@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux
+          - os: windows-latest
+            artifact: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build:web
+      - run: npm run build:daemon
+      - if: runner.os == 'Windows'
+        continue-on-error: true
+        run: node daemon/scripts/build-sea.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-${{ matrix.artifact }}
+          path: |
+            daemon/dist/agent-hub.cjs
+            daemon/dist/agent-hub.exe
+            daemon/public/
+          if-no-files-found: ignore
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - run: npm run build:web
+      - run: npx cap sync android
+      - run: ./gradlew assembleDebug
+        working-directory: android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  publish:
+    needs: [build, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+      - name: Assemble Windows package
+        run: |
+          mkdir -p agent-hub/daemon/dist agent-hub/daemon/public agent-hub/scripts
+          cp release-assets/daemon-windows/dist/agent-hub.cjs agent-hub/daemon/dist/
+          cp -R release-assets/daemon-windows/public/. agent-hub/daemon/public/
+          if [ -f release-assets/daemon-windows/dist/agent-hub.exe ]; then
+            cp release-assets/daemon-windows/dist/agent-hub.exe agent-hub/daemon/dist/
+            cp release-assets/daemon-windows/dist/agent-hub.exe release-assets/agent-hub.exe
+          fi
+          cp scripts/install.ps1 agent-hub/scripts/
+          cp scripts/install.ps1 release-assets/install.ps1
+          cp release-assets/daemon-windows/dist/agent-hub.cjs release-assets/agent-hub.cjs
+          cp release-assets/android-apk/app-debug.apk release-assets/agent-hub-android-debug.apk
+          zip -qr agent-hub-windows.zip agent-hub
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            agent-hub-windows.zip
+            release-assets/agent-hub.cjs
+            release-assets/agent-hub.exe
+            release-assets/agent-hub-android-debug.apk
+            release-assets/install.ps1
+          fail_on_unmatched_files: false

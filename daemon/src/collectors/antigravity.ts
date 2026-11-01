@@ -1,0 +1,131 @@
+import path from 'node:path';
+import { stat } from 'node:fs/promises';
+import { agentHome } from '../config.js';
+import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent, walkFiles } from './files.js';
+import { WatchedCollector } from './watched.js';
+import type { AgentSession, SessionMessage } from '@agent-hub/shared';
+
+function antigravityRoots(): string[] {
+  const home = agentHome();
+  return [
+    path.join(home, '.gemini', 'antigravity-ide'),
+    path.join(home, '.gemini', 'antigravity'),
+    path.join(home, '.gemini', 'antigravity-cli'),
+  ];
+}
+
+export function parseAntigravityRecords(records: Record<string, any>[], id: string, modifiedAt: string, now = Date.now()): {
+  session: AgentSession;
+  messages: SessionMessage[];
+} {
+  let title: string | undefined;
+  let cwd: string | undefined;
+  let branch: string | undefined;
+  let lastRole: AgentSession['lastRole'];
+  let lastMessage: string | undefined;
+  let complete = false;
+  let error = false;
+  let updatedAt = modifiedAt;
+  const messages: SessionMessage[] = [];
+  for (const row of records) {
+    const kind = String(row.type || row.role || row.event || '').toLowerCase();
+    let text = typeof row.text === 'string' ? row.text : textFromContent(row.content ?? row.message?.content) || row.message?.text;
+    if (typeof text === 'string') {
+      text = text.replace(/^<USER_REQUEST>\s*/i, '').replace(/\s*<\/USER_REQUEST>$/i, '');
+    }
+    const roleName = String(row.role || row.source || row.message?.role || kind).toLowerCase();
+    const role = roleName.includes('user') || roleName.includes('human') ? 'user'
+      : roleName.includes('assistant') || roleName.includes('model') || roleName.includes('agent') ? 'assistant'
+        : roleName.includes('system') || roleName.includes('tool') ? 'tool' : undefined;
+    if (typeof row.cwd === 'string') cwd = row.cwd;
+    if (typeof row.branch === 'string') branch = row.branch;
+    if (row.timestamp || row.created_at || row.at) {
+      const at = isoOrNow(row.timestamp || row.created_at || row.at);
+      if (Date.parse(at) > Date.parse(updatedAt)) updatedAt = at;
+    }
+    if (role && typeof text === 'string' && text.trim()) {
+      messages.push(message(text, role, row.timestamp));
+      if (role === 'user' && !title) title = text.trim().slice(0, 180);
+      lastRole = role;
+      lastMessage = text;
+      complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
+        || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
+    }
+    if (/error|abort|failed/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) error = true;
+    if (/turn[_-]?complete|task[_-]?complete/.test(kind)) {
+      complete = true;
+      lastRole = 'assistant';
+    }
+  }
+  const session = buildSession({
+    agent: 'antigravity',
+    nativeId: id,
+    title: title || `Antigravity conversation ${id.slice(0, 8)}`,
+    cwd,
+    branch,
+    updatedAt,
+    status: inferStatus(updatedAt, lastRole, complete, error, now),
+    lastMessage: lastMessage?.slice(-280),
+    lastRole,
+  });
+  return { session, messages };
+}
+
+export class AntigravityCollector extends WatchedCollector {
+  name = 'antigravity';
+  private messagesByFile = new Map<string, SessionMessage[]>();
+  private transcriptById = new Map<string, string>();
+  protected roots(): string[] { return antigravityRoots(); }
+  constructor(private days = 7) { super(); }
+  protected async findFiles(): Promise<string[]> {
+    const files: string[] = [];
+    for (const root of this.roots()) {
+      files.push(...await walkFiles(root, (file) => file.endsWith('.db') || file.endsWith('.pb') || file.endsWith('transcript.jsonl')));
+    }
+    const recent = new Set(await this.recentFiles(files, this.days));
+    const idOf = (file: string) => file.endsWith('transcript.jsonl')
+      ? path.basename(path.dirname(path.dirname(path.dirname(file))))
+      : path.basename(file, path.extname(file));
+    const recentDatabaseIds = new Set(files.filter((file) =>
+      ['.db', '.pb'].includes(path.extname(file)) && recent.has(file)).map(idOf));
+    const transcripts = files.filter((file) => file.endsWith('transcript.jsonl')
+      && (recent.has(file) || recentDatabaseIds.has(idOf(file))));
+    const transcriptIds = new Set(transcripts.map(idOf));
+    const databases = files.filter((file) => ['.db', '.pb'].includes(path.extname(file))
+      && recent.has(file) && !transcriptIds.has(idOf(file)));
+    return [...transcripts, ...databases];
+  }
+  protected async parse(file: string): Promise<AgentSession | undefined> {
+    const isTranscript = file.endsWith('transcript.jsonl');
+    const id = isTranscript
+      ? path.basename(path.dirname(path.dirname(path.dirname(file))))
+      : path.basename(file, path.extname(file));
+    const activityFiles = [file];
+    if (isTranscript) {
+      activityFiles.push(
+        ...this.roots().flatMap((root) => [
+          path.join(root, 'conversations', `${id}.db`),
+          path.join(root, 'conversations', `${id}.pb`),
+        ]),
+      );
+    }
+    let activityTime = 0;
+    for (const candidate of activityFiles) {
+      try { activityTime = Math.max(activityTime, (await stat(candidate)).mtimeMs); } catch { /* Optional sibling file. */ }
+    }
+    const modifiedAt = new Date(activityTime || Date.now()).toISOString();
+    const records = isTranscript ? await parseJsonLines(file) : [];
+    const parsed = parseAntigravityRecords(records, id, modifiedAt);
+    this.messagesByFile.set(file, parsed.messages);
+    if (isTranscript) this.transcriptById.set(id, file);
+    return parsed.session;
+  }
+  protected async messages(file: string, limit: number): Promise<SessionMessage[]> {
+    if (!this.messagesByFile.has(file)) await this.parse(file);
+    return (this.messagesByFile.get(file) || []).slice(-limit);
+  }
+  async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
+    const file = this.transcriptById.get(nativeId);
+    return file ? this.messages(file, limit) : [];
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "agent-hub",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["packages/shared", "daemon", "app"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p daemon/tsconfig.json && tsc --noEmit -p app/tsconfig.json",
+    "test": "vitest run",
+    "build:web": "npm run build -w app && node scripts/copy-web.mjs",
+    "build:daemon": "npm run build -w daemon",
+    "build": "npm run build:web && npm run build:daemon"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.2.0",
+    "@capacitor/barcode-scanner": "^2.0.0",
+    "@capacitor/core": "^7.2.0",
+    "@capacitor/local-notifications": "^7.0.1",
+    "@capacitor/preferences": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
