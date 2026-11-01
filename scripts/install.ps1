@@ -36,7 +36,9 @@ if (($userPath -split ';') -notcontains $installDir) {
   [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
 }
 if (Test-Path $webDir) {
-  Copy-Item $webDir (Join-Path $installDir "public") -Recurse -Force
+  $publicDir = Join-Path $installDir "public"
+  New-Item -ItemType Directory -Force -Path $publicDir | Out-Null
+  Copy-Item (Join-Path $webDir "*") $publicDir -Recurse -Force
 }
 $env:PATH = "$installDir;$env:PATH"
 & $shim install-service

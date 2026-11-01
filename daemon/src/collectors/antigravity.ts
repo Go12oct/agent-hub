@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent, walkFiles } from './files.js';
 import { WatchedCollector } from './watched.js';
+import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
 
 function antigravityRoots(): string[] {
@@ -17,6 +18,7 @@ function antigravityRoots(): string[] {
 export function parseAntigravityRecords(records: Record<string, any>[], id: string, modifiedAt: string, now = Date.now()): {
   session: AgentSession;
   messages: SessionMessage[];
+  statusFacts: { updatedAt: string; lastRole?: AgentSession['lastRole']; completed: boolean; errored: boolean };
 } {
   let title: string | undefined;
   let cwd: string | undefined;
@@ -68,7 +70,7 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
     lastMessage: lastMessage?.slice(-280),
     lastRole,
   });
-  return { session, messages };
+  return { session, messages, statusFacts: { updatedAt, lastRole, completed: complete, errored: error } };
 }
 
 export class AntigravityCollector extends WatchedCollector {
@@ -95,7 +97,21 @@ export class AntigravityCollector extends WatchedCollector {
       && recent.has(file) && !transcriptIds.has(idOf(file)));
     return [...transcripts, ...databases];
   }
-  protected async parse(file: string): Promise<AgentSession | undefined> {
+  protected async fileCacheKey(file: string, mtimeMs: number, size: number): Promise<string> {
+    if (!file.endsWith('transcript.jsonl')) return `${mtimeMs}:${size}`;
+    const id = path.basename(path.dirname(path.dirname(path.dirname(file))));
+    const companionStats: string[] = [];
+    for (const root of this.roots()) {
+      for (const extension of ['.db', '.pb']) {
+        try {
+          const info = await stat(path.join(root, 'conversations', `${id}${extension}`));
+          companionStats.push(`${info.mtimeMs}:${info.size}`);
+        } catch { /* Optional sibling file. */ }
+      }
+    }
+    return `${mtimeMs}:${size}:${companionStats.join(',')}`;
+  }
+  protected async parse(file: string): Promise<ParsedWatchedSession | undefined> {
     const isTranscript = file.endsWith('transcript.jsonl');
     const id = isTranscript
       ? path.basename(path.dirname(path.dirname(path.dirname(file))))
@@ -118,7 +134,7 @@ export class AntigravityCollector extends WatchedCollector {
     const parsed = parseAntigravityRecords(records, id, modifiedAt);
     this.messagesByFile.set(file, parsed.messages);
     if (isTranscript) this.transcriptById.set(id, file);
-    return parsed.session;
+    return { session: parsed.session, statusFacts: parsed.statusFacts };
   }
   protected async messages(file: string, limit: number): Promise<SessionMessage[]> {
     if (!this.messagesByFile.has(file)) await this.parse(file);

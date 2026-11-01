@@ -36,6 +36,36 @@ describe('authenticated HTTP API', () => {
     } finally { await runtime.close(); }
   });
 
+  it('rejects unauthenticated Claude hooks without changing or creating sessions', async () => {
+    const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
+    try {
+      const existing = await runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/claude?token=test-token',
+        payload: { session_id: 'existing-hook-test', hook_event_name: 'UserPromptSubmit', cwd: '/tmp/project' },
+      });
+      expect(existing.statusCode).toBe(200);
+      expect(runtime.sessions.get('claude-code:existing-hook-test')?.status).toBe('working');
+
+      const rejectedExisting = await runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/claude',
+        payload: { session_id: 'existing-hook-test', hook_event_name: 'Notification', cwd: '/tmp/project' },
+      });
+      const rejectedNew = await runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/claude',
+        payload: { session_id: 'new-hook-test', hook_event_name: 'Notification', cwd: '/tmp/project' },
+      });
+
+      expect(rejectedExisting.statusCode).toBe(401);
+      expect(rejectedNew.statusCode).toBe(401);
+      expect(runtime.sessions.get('claude-code:existing-hook-test')?.status).toBe('working');
+      expect(runtime.sessions.has('claude-code:new-hook-test')).toBe(false);
+      expect(runtime.sessions.size).toBe(1);
+    } finally { await runtime.close(); }
+  });
+
   it('streams a snapshot followed by upsert events', async () => {
     const collector = new FakeCollector();
     const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });

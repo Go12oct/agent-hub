@@ -59,9 +59,23 @@ async function run(): Promise<void> {
     const executable = process.execPath;
     const script = isStandalone ? executable : path.resolve(process.argv[1]!);
     const destination = path.join(installDir, isStandalone ? 'agent-hub.exe' : 'agent-hub.cjs');
-    await copyFile(script, destination);
-    const publicDir = path.resolve(path.dirname(script), '..', 'public');
-    if (existsSync(publicDir)) await cp(publicDir, path.join(installDir, 'public'), { recursive: true, force: true });
+    const samePath = (left: string, right: string) => {
+      const resolvedLeft = path.resolve(left);
+      const resolvedRight = path.resolve(right);
+      return process.platform === 'win32'
+        ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+        : resolvedLeft === resolvedRight;
+    };
+    if (!samePath(script, destination)) await copyFile(script, destination);
+    const scriptDir = path.dirname(script);
+    const publicDir = [
+      path.join(scriptDir, 'public'),
+      path.resolve(scriptDir, '..', 'public'),
+    ].find(existsSync);
+    const installedPublicDir = path.join(installDir, 'public');
+    if (publicDir && !samePath(publicDir, installedPublicDir)) {
+      await cp(publicDir, installedPublicDir, { recursive: true, force: true });
+    }
     const runtime = isStandalone ? destination : executable;
     const launcher = path.join(installDir, 'start-hidden.vbs');
     const quoteVbs = (value: string) => `"${value.replaceAll('"', '""')}"`;

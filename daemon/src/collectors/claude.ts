@@ -4,6 +4,7 @@ import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
 import type { EmitSession } from './types.js';
 import { WatchedCollector } from './watched.js';
+import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
 
 export function claudeTitle(text: string): string | undefined {
@@ -38,7 +39,7 @@ export function parseClaudeRecords(
   nativeId: string,
   fileModifiedAt: string,
   now = Date.now(),
-): { session: AgentSession; messages: SessionMessage[] } {
+): { session: AgentSession; messages: SessionMessage[]; statusFacts: { updatedAt: string; lastRole?: AgentSession['lastRole']; completed: boolean; errored: boolean } } {
   const metadata = records.find((record) => record.sessionId || record.session_id);
   const messages: SessionMessage[] = [];
   let title: string | undefined;
@@ -53,14 +54,21 @@ export function parseClaudeRecords(
     if (typeof row.cwd === 'string') cwd = row.cwd;
     if (typeof row.gitBranch === 'string') branch = row.gitBranch;
     const role = row.type === 'user' || row.type === 'assistant' ? row.type : row.message?.role;
-    const text = textFromContent(row.message?.content ?? row.content);
+    const content = row.message?.content ?? row.content;
+    const text = textFromContent(content);
     if (role && text) {
       const mappedRole = role === 'assistant' ? 'assistant' : 'user';
       messages.push(message(text, mappedRole, row.timestamp));
       if (mappedRole === 'user' && !title) title = claudeTitle(text);
       lastRole = mappedRole;
       lastMessage = text;
-      complete = mappedRole === 'assistant' && (row.stop_reason != null || row.message?.stop_reason != null);
+      if (mappedRole === 'user') complete = false;
+    }
+    if (role === 'assistant') {
+      lastRole = 'assistant';
+      const stopReason = row.stop_reason ?? row.message?.stop_reason;
+      const hasToolUse = Array.isArray(content) && content.some((part) => part?.type === 'tool_use');
+      complete = stopReason === 'end_turn' || (stopReason !== 'tool_use' && !hasToolUse);
     }
     if (row.type === 'summary' && typeof row.summary === 'string' && !title) title = row.summary.slice(0, 180);
     if (row.type === 'stop_failure') errored = true;
@@ -70,6 +78,7 @@ export function parseClaudeRecords(
     }
   }
   updatedAt = isoOrNow(updatedAt);
+  const statusFacts = { updatedAt, lastRole, completed: complete, errored };
   return {
     session: buildSession({
       agent: 'claude-code', nativeId, title, cwd, branch, updatedAt, startedAt: records[0]?.timestamp,
@@ -77,6 +86,7 @@ export function parseClaudeRecords(
       lastMessage: lastMessage?.slice(-280), lastRole,
     }),
     messages,
+    statusFacts,
   };
 }
 
@@ -111,18 +121,25 @@ export class ClaudeCollector extends WatchedCollector {
       emit?.(updated);
     }
   }
-  protected async parse(file: string): Promise<AgentSession | undefined> {
+  protected async parse(file: string): Promise<ParsedWatchedSession | undefined> {
     const records = await parseJsonLines(file);
     const metadata = records.find((record) => record.sessionId || record.session_id);
     const nativeId = String(metadata?.sessionId || metadata?.session_id || path.basename(file, '.jsonl'));
     const modifiedAt = new Date((await stat(file)).mtimeMs).toISOString();
     const parsed = parseClaudeRecords(records, nativeId, modifiedAt);
-    const hook = this.hookOverrides.get(nativeId);
-    const override = hook && claudeHookOverride(Date.parse(modifiedAt), hook.status, hook.at);
-    if (override) parsed.session.status = override;
-    else if (hook) this.hookOverrides.delete(nativeId);
     this.messagesById.set(nativeId, parsed.messages);
-    return parsed.session;
+    return { session: parsed.session, statusFacts: parsed.statusFacts };
+  }
+  protected refreshSession(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
+    const session = super.refreshSession(parsed, mtimeMs, now);
+    const hook = this.hookOverrides.get(session.nativeId);
+    if (!hook) return session;
+    const override = claudeHookOverride(mtimeMs, hook.status, hook.at);
+    if (!override) {
+      this.hookOverrides.delete(session.nativeId);
+      return session;
+    }
+    return { ...session, status: override, updatedAt: new Date(Math.max(Date.parse(session.updatedAt), hook.at)).toISOString() };
   }
   private messagesById = new Map<string, SessionMessage[]>();
   protected async messages(file: string, limit: number): Promise<SessionMessage[]> {

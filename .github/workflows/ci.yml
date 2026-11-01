@@ -26,6 +26,7 @@ jobs:
       - if: runner.os == 'Windows'
         continue-on-error: true
         run: node daemon/scripts/build-sea.mjs
+        working-directory: .
       - uses: actions/upload-artifact@v4
         with:
           name: agent-hub-daemon-${{ runner.os }}

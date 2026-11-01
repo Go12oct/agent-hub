@@ -1,8 +1,27 @@
 import { watch, type FSWatcher } from 'chokidar';
 import { setTimeout as delay } from 'node:timers/promises';
-import { filesModifiedAfter } from './files.js';
+import { stat } from 'node:fs/promises';
+import { filesModifiedAfter, inferStatus } from './files.js';
 import type { Collector, EmitSession } from './types.js';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
+
+export interface SessionStatusFacts {
+  updatedAt: string;
+  lastRole?: AgentSession['lastRole'];
+  completed: boolean;
+  errored: boolean;
+}
+
+export interface ParsedWatchedSession {
+  session: AgentSession;
+  statusFacts?: SessionStatusFacts;
+}
+
+interface CachedFile {
+  key: string;
+  mtimeMs: number;
+  parsed: ParsedWatchedSession;
+}
 
 export abstract class WatchedCollector implements Collector {
   abstract name: string;
@@ -11,34 +30,52 @@ export abstract class WatchedCollector implements Collector {
   protected timer?: NodeJS.Timeout;
   protected readonly fileById = new Map<string, string>();
   protected readonly sessions = new Map<string, AgentSession>();
+  private readonly parsedFiles = new Map<string, CachedFile>();
+  private rescanTimer?: NodeJS.Timeout;
+  private scanPromise?: Promise<void>;
+  private scanPending = false;
+  private stopped = false;
 
   protected abstract roots(): string[];
   protected abstract findFiles(): Promise<string[]>;
-  protected abstract parse(file: string): Promise<AgentSession | undefined>;
+  protected abstract parse(file: string): Promise<ParsedWatchedSession | undefined>;
   protected abstract messages(file: string, limit: number): Promise<SessionMessage[]>;
   protected shouldRetain(_session: AgentSession): boolean { return false; }
+  protected async fileCacheKey(_file: string, mtimeMs: number, size: number): Promise<string> {
+    return `${mtimeMs}:${size}`;
+  }
+  protected refreshSession(parsed: ParsedWatchedSession, _mtimeMs: number, now: number): AgentSession {
+    const facts = parsed.statusFacts;
+    return facts
+      ? { ...parsed.session, status: inferStatus(facts.updatedAt, facts.lastRole, facts.completed, facts.errored, now) }
+      : parsed.session;
+  }
 
   start(emit: EmitSession): void {
     this.emit = emit;
+    this.stopped = false;
     const roots = this.roots();
     this.watcher = watch(roots, {
       ignoreInitial: true,
       usePolling: process.env.AGENT_HUB_USE_POLLING === 'true',
       awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
     });
-    this.watcher.on('add', () => void this.rescan());
-    this.watcher.on('change', () => void this.rescan());
+    this.watcher.on('add', () => this.scheduleRescan());
+    this.watcher.on('change', () => this.scheduleRescan());
     this.watcher.on('error', (error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[${this.name}] watcher failed: ${message}`);
     });
-    this.timer = setInterval(() => void this.rescan(), 15_000);
-    void this.rescan();
+    this.timer = setInterval(() => this.scheduleRescan(), 15_000);
+    this.scheduleRescan();
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    if (this.rescanTimer) clearTimeout(this.rescanTimer);
     await this.watcher?.close();
+    await this.scanPromise;
   }
 
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
@@ -50,14 +87,27 @@ export abstract class WatchedCollector implements Collector {
     return filesModifiedAfter(files, Date.now() - days * 24 * 60 * 60 * 1000);
   }
 
-  private async rescan(): Promise<void> {
-    if (!this.emit) return;
+  protected async rescan(): Promise<void> {
+    if (!this.emit || this.stopped) return;
     try {
       const files = await this.findFiles();
+      const present = new Set(files);
       const active = new Set<string>();
       for (const file of files) {
-        const session = await this.parse(file);
-        if (!session) continue;
+        let fileStat;
+        try { fileStat = await stat(file); } catch { continue; }
+        const key = await this.fileCacheKey(file, fileStat.mtimeMs, fileStat.size);
+        let cached = this.parsedFiles.get(file);
+        if (!cached || cached.key !== key) {
+          const parsed = await this.parse(file);
+          if (!parsed) {
+            this.parsedFiles.delete(file);
+            continue;
+          }
+          cached = { key, mtimeMs: fileStat.mtimeMs, parsed };
+          this.parsedFiles.set(file, cached);
+        }
+        const session = this.refreshSession(cached.parsed, cached.mtimeMs, Date.now());
         active.add(session.id);
         this.fileById.set(session.nativeId, file);
         const old = this.sessions.get(session.id);
@@ -65,6 +115,9 @@ export abstract class WatchedCollector implements Collector {
         if (!old || old.updatedAt !== session.updatedAt || old.status !== session.status || old.title !== session.title) {
           this.emit(session);
         }
+      }
+      for (const file of this.parsedFiles.keys()) {
+        if (!present.has(file)) this.parsedFiles.delete(file);
       }
       for (const [id, session] of this.sessions) {
         if (active.has(id) || this.shouldRetain(session)) continue;
@@ -75,6 +128,34 @@ export abstract class WatchedCollector implements Collector {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[${this.name}] scan failed: ${message}`);
+    }
+  }
+
+  private scheduleRescan(): void {
+    if (!this.emit || this.stopped) return;
+    if (this.rescanTimer) clearTimeout(this.rescanTimer);
+    this.rescanTimer = setTimeout(() => {
+      this.rescanTimer = undefined;
+      void this.runRescan();
+    }, 1_000);
+  }
+
+  private async runRescan(): Promise<void> {
+    if (this.scanPromise) {
+      this.scanPending = true;
+      return;
+    }
+    this.scanPending = false;
+    const scan = this.rescan();
+    this.scanPromise = scan;
+    try {
+      await scan;
+    } finally {
+      this.scanPromise = undefined;
+      if (this.scanPending && !this.rescanTimer && !this.stopped) {
+        this.scanPending = false;
+        void this.runRescan();
+      }
     }
   }
 }

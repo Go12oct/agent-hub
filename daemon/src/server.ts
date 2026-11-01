@@ -74,10 +74,10 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
   app.get('/health', async () => ({ ok: true }));
   app.addHook('preHandler', async (request, reply) => {
     if (request.url.startsWith('/api/') && !authorized(request, config.token)) {
-      await reply.code(401).send({ error: 'Unauthorized' });
+      return reply.code(401).send({ error: 'Unauthorized' });
     }
     if (request.url.startsWith('/hooks/claude') && !authorized(request, config.token)) {
-      await reply.code(401).send({ error: 'Unauthorized' });
+      return reply.code(401).send({ error: 'Unauthorized' });
     }
   });
   app.get('/api/sessions', async () => [...sessions.values()].sort((a, b) => {

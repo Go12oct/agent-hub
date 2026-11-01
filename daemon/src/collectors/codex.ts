@@ -4,6 +4,7 @@ import type { AgentSession, SessionMessage } from '@agent-hub/shared';
 import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
 import { WatchedCollector } from './watched.js';
+import type { ParsedWatchedSession } from './watched.js';
 
 function codexRoot(): string {
   return process.env.CODEX_HOME || path.join(agentHome(), '.codex');
@@ -25,7 +26,11 @@ async function jsonlFiles(dir: string): Promise<string[]> {
   return files;
 }
 
-export function parseCodexRecords(records: Record<string, any>[], fileId = 'unknown', now = Date.now()): { session: AgentSession; messages: SessionMessage[] } {
+export function parseCodexRecords(records: Record<string, any>[], fileId = 'unknown', now = Date.now()): {
+  session: AgentSession;
+  messages: SessionMessage[];
+  statusFacts: { updatedAt: string; lastRole?: AgentSession['lastRole']; completed: boolean; errored: boolean };
+} {
   const sessionMeta = records.find((record) => record.type === 'session_meta')?.payload || {};
   const meta = sessionMeta.meta || sessionMeta;
   const nativeId = String(meta.id || meta.session_id || fileId);
@@ -78,6 +83,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     }
   }
   const updatedAt = isoOrNow(timestamp);
+  const statusFacts = { updatedAt, lastRole, completed, errored: error };
   return {
     session: buildSession({
       agent: 'codex', nativeId, title, cwd,
@@ -87,6 +93,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       lastMessage: lastMessage?.slice(-280), lastRole,
     }),
     messages: output,
+    statusFacts,
   };
 }
 
@@ -98,9 +105,9 @@ export class CodexCollector extends WatchedCollector {
     return this.recentFiles(files, this.days);
   }
   constructor(private days = 7) { super(); }
-  protected async parse(file: string): Promise<AgentSession | undefined> {
+  protected async parse(file: string): Promise<ParsedWatchedSession | undefined> {
     const parsed = parseCodexRecords(await parseJsonLines(file), path.basename(file, '.jsonl'));
-    return parsed.session;
+    return { session: parsed.session, statusFacts: parsed.statusFacts };
   }
   protected async messages(file: string, limit: number): Promise<SessionMessage[]> {
     return parseCodexRecords(await parseJsonLines(file), path.basename(file, '.jsonl')).messages.slice(-limit);

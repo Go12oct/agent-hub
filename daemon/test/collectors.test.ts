@@ -1,15 +1,41 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
 import { CodexCollector, parseCodexRecords } from '../src/collectors/codex';
 import { ClaudeCollector, claudeHookOverride, mapClaudeHook, parseClaudeRecords } from '../src/collectors/claude';
 import { AntigravityCollector, parseAntigravityRecords } from '../src/collectors/antigravity';
 import { mapDevinStatus, DevinCollector } from '../src/collectors/devin';
 import { CodexCloudCollector } from '../src/collectors/codex-cloud';
+import { WatchedCollector, type ParsedWatchedSession } from '../src/collectors/watched';
+import type { EmitSession } from '../src/collectors/types';
 
 const fixtures = path.resolve('daemon/test/fixtures/home');
+
+class CachedFileCollector extends WatchedCollector {
+  name = 'cached-test';
+  refreshCount = 0;
+  constructor(private root: string, private file: string) { super(); }
+  protected roots(): string[] { return [this.root]; }
+  protected async findFiles(): Promise<string[]> { return [this.file]; }
+  async parse(): Promise<ParsedWatchedSession> {
+    const updatedAt = new Date().toISOString();
+    return {
+      session: { id: 'cached-test:fixture', agent: 'codex', nativeId: 'fixture', title: 'Fixture', status: 'working', updatedAt, machine: 'test' },
+      statusFacts: { updatedAt, lastRole: 'assistant', completed: true, errored: false },
+    };
+  }
+  protected async messages(): Promise<[]> { return []; }
+  protected refreshSession(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
+    this.refreshCount++;
+    return super.refreshSession(parsed, mtimeMs, now);
+  }
+  async scan(emit: EmitSession): Promise<void> {
+    this.emit = emit;
+    await this.rescan();
+  }
+}
 
 async function fixtureLines(file: string): Promise<Record<string, any>[]> {
   return (await readFile(path.join(fixtures, file), 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
@@ -65,6 +91,25 @@ describe('fixture-backed collector discovery', () => {
   });
 });
 
+describe('watched collector cache', () => {
+  it('does not re-parse unchanged files and refreshes cached status facts', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-watched-'));
+    const file = path.join(home, 'session.jsonl');
+    await writeFile(file, '{"fixture":true}\n');
+    const collector = new CachedFileCollector(home, file);
+    const parseSpy = vi.spyOn(collector, 'parse');
+    try {
+      await collector.scan(() => {});
+      await collector.scan(() => {});
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+      expect(collector.refreshCount).toBe(2);
+    } finally {
+      await collector.stop();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Claude Code hooks', () => {
   it('maps hook events and applies an immediate session status', async () => {
     expect(mapClaudeHook('PreToolUse')).toBe('working');
@@ -90,6 +135,15 @@ describe('Claude Code hooks', () => {
     expect(parsed.session.branch).toBe('feature/feed');
     expect(parsed.session.status).toBe('needs_input');
     expect(parsed.messages).toHaveLength(2);
+  });
+
+  it('does not complete an assistant entry that contains tool use', () => {
+    const parsed = parseClaudeRecords([
+      { type: 'user', timestamp: '2025-01-02T11:00:00.000Z', message: { role: 'user', content: 'Run the checks' } },
+      { type: 'assistant', timestamp: '2025-01-02T11:00:04.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash' }], stop_reason: null } },
+    ], 'claude-tool-use', '2025-01-02T11:00:04.000Z', Date.parse('2025-01-02T11:00:04.000Z'));
+    expect(parsed.session.status).toBe('working');
+    expect(parsed.statusFacts.completed).toBe(false);
   });
 });
 

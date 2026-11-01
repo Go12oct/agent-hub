@@ -1,10 +1,11 @@
 import { copyFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const root = process.cwd();
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const configFile = path.join(root, 'sea-config.json');
 const blob = path.join(root, 'sea-prep.blob');
 const executable = path.join(root, 'dist', 'agent-hub.exe');
