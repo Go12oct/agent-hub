@@ -47,7 +47,8 @@ phone cannot connect, choose the PC's Wi-Fi address explicitly, for example
 and `169.254.x.x` addresses. Windows Firewall must allow inbound TCP port 4747;
 the installer requests permission to add that rule. If it was declined, run
 `agent-hub firewall` and approve the UAC prompt. The rule applies to all
-Windows network profiles, including Public.
+Windows network profiles, including Public, but only allows connections from
+the local subnet and Tailscale's `100.64.0.0/10` range.
 
 ### Remote access with Tailscale
 

@@ -8,6 +8,7 @@ import { isSea } from 'node:sea';
 import qrcode from 'qrcode-terminal';
 import { loadConfig, setConfigValue, configDirectory } from './config.js';
 import { installClaudeHooks, uninstallClaudeHooks } from './claude-hooks.js';
+import { firewallRuleScript } from './firewall.js';
 import { lanUrls, startServer } from './server.js';
 import { installWindowsService, isDaemonHealthy, uninstallWindowsService } from './windows-service.js';
 
@@ -19,11 +20,9 @@ function runProcess(command: string, args: string[]): Promise<void> {
   });
 }
 
-async function addWindowsFirewallRule(): Promise<void> {
-  const firewallCommand = "try { New-NetFirewallRule -DisplayName 'Agent Hub' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4747 -Profile Any -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }";
-  const encodedCommand = Buffer.from(firewallCommand, 'utf16le').toString('base64');
-  const elevationCommand = `$ErrorActionPreference = 'Stop'; try { $rule = Get-NetFirewallRule -DisplayName 'Agent Hub' -Direction Inbound -Action Allow -ErrorAction SilentlyContinue; if (-not $rule) { $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodedCommand}'); if ($process.ExitCode -ne 0) { exit $process.ExitCode } }; exit 0 } catch { exit 1 }`;
-  await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', elevationCommand]);
+async function addWindowsFirewallRule(port: number): Promise<void> {
+  const encodedCommand = Buffer.from(firewallRuleScript(port), 'utf16le').toString('base64');
+  await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCommand]);
 }
 
 async function run(): Promise<void> {
@@ -60,11 +59,13 @@ async function run(): Promise<void> {
       console.log('The Agent Hub firewall rule can only be configured on Windows.');
       return;
     }
+    const port = (await loadConfig()).port;
     try {
-      await addWindowsFirewallRule();
-      console.log('Windows Firewall allows Agent Hub on TCP port 4747.');
+      await addWindowsFirewallRule(port);
+      console.log(`Windows Firewall allows Agent Hub on TCP port ${port}.`);
     } catch {
       console.warn('Could not add the Windows Firewall rule. Approve the UAC prompt or run agent-hub firewall as administrator.');
+      process.exitCode = 1;
     }
   } else if (command === 'config' && args[0] === 'set' && args[1] && args[2] !== undefined) {
     await setConfigValue(args[1], args.slice(2).join(' '));
