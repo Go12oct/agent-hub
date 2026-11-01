@@ -37,6 +37,14 @@ class CachedFileCollector extends WatchedCollector {
   }
 }
 
+class InspectableAntigravityCollector extends AntigravityCollector {
+  async discover(): Promise<string[]> { return this.findFiles(); }
+}
+
+function collectorWatchTargets(collector: WatchedCollector): { paths: string[]; depth?: number } {
+  return (collector as unknown as { watchTargets(): { paths: string[]; depth?: number } }).watchTargets();
+}
+
 async function fixtureLines(file: string): Promise<Record<string, any>[]> {
   return (await readFile(path.join(fixtures, file), 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
 }
@@ -104,6 +112,66 @@ describe('fixture-backed collector discovery', () => {
     expect(codex.title).toBe('Fix the live feed sorting');
     expect(claude.title).toBe('Review the latest changes');
     expect(antigravity.title).toBe('Implement the settings panel');
+  });
+});
+
+describe('Antigravity discovery and watcher scope', () => {
+  it('selects only brain transcripts and conversation databases', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-antigravity-'));
+    const previousHome = process.env.AGENT_HUB_HOME;
+    process.env.AGENT_HUB_HOME = home;
+    const root = path.join(home, '.gemini', 'antigravity');
+    const transcript = path.join(root, 'brain', 'a', '.system_generated', 'logs', 'transcript.jsonl');
+    const database = path.join(root, 'conversations', 'b.db');
+    const worktreeDecoy = path.join(root, 'worktrees', 'x', 'brain', 'c', '.system_generated', 'logs', 'transcript.jsonl');
+    const numberedDecoy = path.join(root, 'brain', 'a', 'logs', '00000000.jsonl');
+    try {
+      await mkdir(path.dirname(transcript), { recursive: true });
+      await mkdir(path.dirname(database), { recursive: true });
+      await mkdir(path.dirname(worktreeDecoy), { recursive: true });
+      await mkdir(path.dirname(numberedDecoy), { recursive: true });
+      await writeFile(transcript, '{"type":"assistant","text":"done"}\n');
+      await writeFile(database, 'synthetic database\n');
+      await writeFile(worktreeDecoy, '{"type":"assistant","text":"decoy"}\n');
+      await writeFile(numberedDecoy, '{"type":"assistant","text":"decoy"}\n');
+
+      const files = await new InspectableAntigravityCollector().discover();
+      expect(new Set(files)).toEqual(new Set([transcript, database]));
+    } finally {
+      if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
+      else process.env.AGENT_HUB_HOME = previousHome;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('limits collector watch targets to relevant directory depths', () => {
+    const previousHome = process.env.AGENT_HUB_HOME;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.AGENT_HUB_HOME = '/synthetic/home';
+    process.env.CODEX_HOME = '/synthetic/codex';
+    try {
+      expect(collectorWatchTargets(new CodexCollector())).toEqual({
+        paths: ['/synthetic/codex/sessions', '/synthetic/codex/archived_sessions'],
+        depth: 3,
+      });
+      expect(collectorWatchTargets(new ClaudeCollector())).toEqual({
+        paths: ['/synthetic/home/.claude/projects'],
+        depth: 2,
+      });
+      expect(collectorWatchTargets(new AntigravityCollector())).toEqual({
+        paths: [
+          '/synthetic/home/.gemini/antigravity-ide/conversations',
+          '/synthetic/home/.gemini/antigravity/conversations',
+          '/synthetic/home/.gemini/antigravity-cli/conversations',
+        ],
+        depth: 0,
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
+      else process.env.AGENT_HUB_HOME = previousHome;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    }
   });
 });
 

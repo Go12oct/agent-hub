@@ -1,7 +1,8 @@
 import path from 'node:path';
-import { stat } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
-import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent, walkFiles } from './files.js';
+import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
@@ -78,11 +79,42 @@ export class AntigravityCollector extends WatchedCollector {
   private messagesByFile = new Map<string, SessionMessage[]>();
   private transcriptById = new Map<string, string>();
   protected roots(): string[] { return antigravityRoots(); }
+  protected watchTargets(): { paths: string[]; depth: number } {
+    return { paths: this.roots().map((root) => path.join(root, 'conversations')), depth: 0 };
+  }
   constructor(private days = 7) { super(); }
   protected async findFiles(): Promise<string[]> {
     const files: string[] = [];
     for (const root of this.roots()) {
-      files.push(...await walkFiles(root, (file) => file.endsWith('.db') || file.endsWith('.pb') || file.endsWith('transcript.jsonl')));
+      const conversations = path.join(root, 'conversations');
+      let conversationEntries: Dirent[];
+      try { conversationEntries = await readdir(conversations, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        conversationEntries = [];
+      }
+      for (const entry of conversationEntries) {
+        if (entry.isFile() && (entry.name.endsWith('.db') || entry.name.endsWith('.pb'))) {
+          files.push(path.join(conversations, entry.name));
+        }
+      }
+
+      const brain = path.join(root, 'brain');
+      let brainEntries: Dirent[];
+      try { brainEntries = await readdir(brain, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        brainEntries = [];
+      }
+      for (const entry of brainEntries) {
+        if (!entry.isDirectory()) continue;
+        const transcript = path.join(brain, entry.name, '.system_generated', 'logs', 'transcript.jsonl');
+        try {
+          if ((await stat(transcript)).isFile()) files.push(transcript);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
     }
     const recent = new Set(await this.recentFiles(files, this.days));
     const idOf = (file: string) => file.endsWith('transcript.jsonl')

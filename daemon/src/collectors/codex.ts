@@ -112,6 +112,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
 export class CodexCollector extends WatchedCollector {
   name = 'codex';
   protected roots(): string[] { return [path.join(codexRoot(), 'sessions'), path.join(codexRoot(), 'archived_sessions')]; }
+  protected watchTargets(): { paths: string[]; depth: number } { return { paths: this.roots(), depth: 3 }; }
   protected async findFiles(): Promise<string[]> {
     const files = [...await jsonlFiles(this.roots()[0]!), ...await jsonlFiles(this.roots()[1]!)];
     return this.recentFiles(files, this.days);

@@ -100,6 +100,7 @@ export class ClaudeCollector extends WatchedCollector {
   name = 'claude-code';
   private hookOverrides = new Map<string, { status: SessionStatus; at: number; message?: string }>();
   protected roots(): string[] { return [path.join(agentHome(), '.claude', 'projects')]; }
+  protected watchTargets(): { paths: string[]; depth: number } { return { paths: this.roots(), depth: 2 }; }
   protected async findFiles(): Promise<string[]> {
     const { walkFiles } = await import('./files.js');
     return this.recentFiles(await walkFiles(this.roots()[0]!, (file) => file.endsWith('.jsonl')), this.days);

@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from 'chokidar';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setImmediate as yieldToEventLoop, setTimeout as delay } from 'node:timers/promises';
 import { stat } from 'node:fs/promises';
 import { filesModifiedAfter, inferStatus } from './files.js';
 import type { Collector, EmitSession } from './types.js';
@@ -41,6 +41,7 @@ export abstract class WatchedCollector implements Collector {
   protected abstract findFiles(): Promise<string[]>;
   protected abstract parse(file: string): Promise<ParsedWatchedSession | undefined>;
   protected abstract messages(file: string, limit: number): Promise<SessionMessage[]>;
+  protected watchTargets(): { paths: string[]; depth?: number } { return { paths: this.roots() }; }
   protected shouldRetain(_session: AgentSession): boolean { return false; }
   protected async fileCacheKey(_file: string, mtimeMs: number, size: number): Promise<string> {
     return `${mtimeMs}:${size}`;
@@ -55,11 +56,13 @@ export abstract class WatchedCollector implements Collector {
   start(emit: EmitSession): void {
     this.emit = emit;
     this.stopped = false;
-    const roots = this.roots();
-    this.watcher = watch(roots, {
+    const { paths, depth } = this.watchTargets();
+    this.watcher = watch(paths, {
       ignoreInitial: true,
       usePolling: process.env.AGENT_HUB_USE_POLLING === 'true',
+      ignored: /(^|[\\/])(node_modules|\.git|worktrees)([\\/]|$)/i,
       awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
+      ...(depth === undefined ? {} : { depth }),
     });
     this.watcher.on('add', () => this.scheduleRescan());
     this.watcher.on('change', () => this.scheduleRescan());
@@ -98,7 +101,9 @@ export abstract class WatchedCollector implements Collector {
       fileCount = files.length;
       const present = new Set(files);
       const active = new Set<string>();
-      for (const file of files) {
+      for (let index = 0; index < files.length; index++) {
+        if (index > 0 && index % 20 === 0) await yieldToEventLoop();
+        const file = files[index]!;
         let fileStat;
         try { fileStat = await stat(file); } catch { continue; }
         const key = await this.fileCacheKey(file, fileStat.mtimeMs, fileStat.size);
