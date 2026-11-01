@@ -8,11 +8,17 @@ $port = ${port}
 $rules = @(Get-NetFirewallRule -DisplayName 'Agent Hub' -ErrorAction SilentlyContinue)
 $matchingRule = $rules | Where-Object {
   $portFilter = $_ | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue
+  $addressFilter = $_ | Get-NetFirewallAddressFilter -ErrorAction SilentlyContinue
+  $remoteAddresses = @($addressFilter.RemoteAddress)
   $_.Enabled -eq 'True' -and
     $_.Direction -eq 'Inbound' -and
     $_.Action -eq 'Allow' -and
     $portFilter.Protocol -eq 'TCP' -and
-    @($portFilter.LocalPort) -contains "$port"
+    @($portFilter.LocalPort) -contains "$port" -and
+    $remoteAddresses.Count -eq 2 -and
+    $remoteAddresses -contains 'LocalSubnet' -and
+    ($remoteAddresses -contains '100.64.0.0/10' -or
+      $remoteAddresses -contains '100.64.0.0/255.192.0.0')
 } | Select-Object -First 1
 if ($matchingRule) {
   exit 0
