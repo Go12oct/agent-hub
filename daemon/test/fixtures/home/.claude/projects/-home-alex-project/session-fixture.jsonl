@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"claude-fixture","timestamp":"2025-01-02T11:00:00.000Z","cwd":"/home/alex/project","gitBranch":"feature/feed","message":{"role":"user","content":"Review the latest changes"}}
+{"type":"assistant","sessionId":"claude-fixture","timestamp":"2025-01-02T11:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The changes look good."}],"stop_reason":null}}

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build:web
+      - run: npm run build:daemon
+      - if: runner.os == 'Windows'
+        continue-on-error: true
+        run: node daemon/scripts/build-sea.mjs
+        working-directory: .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-hub-daemon-${{ runner.os }}
+          path: |
+            daemon/dist/agent-hub.cjs
+            daemon/dist/agent-hub.exe
+            daemon/public/
+          if-no-files-found: ignore
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - run: npm ci
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - run: npm run build:web
+      - run: npx cap sync android
+      - run: ./gradlew assembleDebug
+        working-directory: android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-hub-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
