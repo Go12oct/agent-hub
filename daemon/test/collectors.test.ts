@@ -343,6 +343,9 @@ describe('Antigravity transcript parser', () => {
     expect(aborted.statusFacts.errored).toBe(false);
     expect(aborted.session.status).toBe('done');
     expect(parse([
+      { type: 'turn_aborted', status: 'ERROR' },
+    ]).session.status).toBe('error');
+    expect(parse([
       { role: 'assistant', text: 'Request failed', status: 'ERROR' },
     ]).session.status).toBe('error');
     expect(parse([

@@ -61,12 +61,13 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
         || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
     }
-    const abortOnly = /abort/.test(kind) && !/error|fail/.test(kind);
+    const explicitFailure = ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase());
+    const abortOnly = /abort/.test(kind) && !/error|fail/.test(kind) && !explicitFailure;
     if (abortOnly) {
       complete = true;
       lastRole = 'assistant';
       lastActivityIndex = index;
-    } else if (/error|fail/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) {
+    } else if (/error|fail/.test(kind) || explicitFailure) {
       lastErrorIndex = index;
     }
     if (/turn[_-]?complete|task[_-]?complete/.test(kind)) {
