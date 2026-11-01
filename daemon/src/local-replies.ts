@@ -1,9 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { agentLabels, type AgentSession } from '@agent-hub/shared';
+import { agentHome } from './config.js';
 
 export type ReplyAgent = 'codex' | 'claude-code' | 'antigravity';
 
@@ -24,6 +25,7 @@ export interface ReplyRunner {
   onChange?: (sessionId: string) => void;
   init?(): Promise<void>;
   supports(agent: ReplyAgent): boolean;
+  canReplyTo?(session: AgentSession): boolean;
   isRunning(sessionId: string): boolean;
   failure(sessionId: string): ReplyFailure | undefined;
   send(session: AgentSession, text: string): Promise<void>;
@@ -186,6 +188,19 @@ export class LocalReplyRunner implements ReplyRunner {
     return this.executables.has(agent);
   }
 
+  canReplyTo(session: AgentSession): boolean {
+    if (session.agent !== 'antigravity') {
+      return (session.agent === 'codex' || session.agent === 'claude-code')
+        && this.supports(session.agent);
+    }
+    if (!this.supports('antigravity') || !/^[A-Za-z0-9._-]{1,128}$/.test(session.nativeId)) return false;
+
+    const cliHome = path.join(agentHome(), '.gemini', 'antigravity-cli');
+    return existsSync(path.join(cliHome, 'conversations', `${session.nativeId}.db`))
+      || existsSync(path.join(cliHome, 'conversations', `${session.nativeId}.pb`))
+      || existsSync(path.join(cliHome, 'brain', session.nativeId));
+  }
+
   isRunning(sessionId: string): boolean {
     return this.active.has(sessionId);
   }
@@ -202,6 +217,12 @@ export class LocalReplyRunner implements ReplyRunner {
     const agent = session.agent as ReplyAgent;
     const executable = this.executables.get(agent);
     if (!executable) throw new ReplyFailedError('', `Failed to start ${session.agent}`);
+    if (!this.canReplyTo(session)) {
+      if (agent === 'antigravity') {
+        throw new ReplyFailedError('', 'Antigravity can only continue chats started with the agy CLI');
+      }
+      throw new ReplyFailedError('', `Failed to start ${session.agent}`);
+    }
 
     const command = buildReplyCommand(agent, session.nativeId, text, session.cwd, executable);
     let child: ChildProcess;

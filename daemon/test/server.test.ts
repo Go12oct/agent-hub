@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { AgentSession } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
-import { ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner } from '../src/local-replies';
+import {
+  LocalReplyRunner, ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner,
+} from '../src/local-replies';
 import { createHub } from '../src/server';
 
 class FakeCollector implements Collector {
@@ -107,6 +112,65 @@ describe('authenticated HTTP API', () => {
       expect(unsupported.statusCode).toBe(405);
       expect(unsupported.json()).toEqual({ error: 'Replies are not supported for this agent' });
     } finally { await runtime.close(); }
+  });
+
+  it('only allows Antigravity replies for chats in the agy CLI store', async () => {
+    const previousHome = process.env.AGENT_HUB_HOME;
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-antigravity-api-'));
+    process.env.AGENT_HUB_HOME = home;
+    const cliHome = path.join(home, '.gemini', 'antigravity-cli');
+    const collector = new FakeCollector();
+    const replyRunner = new LocalReplyRunner({
+      commands: { antigravity: 'agy' },
+      resolve: async () => undefined,
+    });
+    let runtime: ReturnType<typeof createHub> | undefined;
+
+    try {
+      await mkdir(path.join(cliHome, 'conversations'), { recursive: true });
+      await writeFile(path.join(cliHome, 'conversations', 'cli-created.db'), '');
+      await mkdir(path.join(home, '.gemini', 'antigravity', 'conversations'), { recursive: true });
+      await writeFile(path.join(home, '.gemini', 'antigravity', 'conversations', 'ide-only.db'), '');
+
+      runtime = createHub(config, {
+        collectors: [collector],
+        replyRunner,
+        staticDir: '/nonexistent/agent-hub-web',
+      });
+      collector.emit?.(testSession('antigravity', 'cli-created'));
+      collector.emit?.(testSession('antigravity', 'ide-only'));
+      await runtime.ready;
+
+      const sessions = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(sessions.json()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'antigravity:cli-created', canReply: true }),
+        expect.objectContaining({ id: 'antigravity:ide-only', canReply: false }),
+      ]));
+
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/antigravity:ide-only/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Continue this chat' },
+      });
+      expect(response.statusCode).toBe(405);
+      expect(response.json()).toEqual({
+        error: 'Antigravity can only continue chats started with the agy CLI',
+      });
+      await expect(replyRunner.send(testSession('antigravity', 'ide-only'), 'Continue this chat'))
+        .rejects.toMatchObject({
+          name: 'ReplyFailedError',
+          message: 'Antigravity can only continue chats started with the agy CLI',
+        });
+    } finally {
+      if (runtime) await runtime.close();
+      if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
+      else process.env.AGENT_HUB_HOME = previousHome;
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   it('sends a supported reply and returns 204', async () => {

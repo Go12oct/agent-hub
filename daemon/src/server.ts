@@ -90,7 +90,9 @@ export function createHub(
       ...session,
       canReply: session.agent === 'devin'
         ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
-        : isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent)),
+        : isReplyAgent(session.agent) && Boolean(
+          replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
+        ),
       replyError: failure && Date.parse(failure.at) >= Date.parse(session.updatedAt) ? failure.error : undefined,
       status: replyRunner?.isRunning(session.id) ? 'working' : session.status,
     };
@@ -162,7 +164,12 @@ export function createHub(
     if (!session) return reply.code(404).send({ error: 'Session not found' });
     const collector = collectors.find((item) => item.name === session.agent);
     const isDevinReply = session.agent === 'devin' && Boolean(collector?.sendMessage);
-    const isLocalReply = isReplyAgent(session.agent) && Boolean(replyRunner?.supports(session.agent));
+    const isLocalReply = isReplyAgent(session.agent) && Boolean(
+      replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
+    );
+    if (session.agent === 'antigravity' && replyRunner?.canReplyTo && !isLocalReply) {
+      return reply.code(405).send({ error: 'Antigravity can only continue chats started with the agy CLI' });
+    }
     if (!isDevinReply && !isLocalReply) {
       return reply.code(405).send({ error: 'Replies are not supported for this agent' });
     }

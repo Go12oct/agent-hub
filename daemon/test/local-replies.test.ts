@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess, spawn } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
@@ -107,6 +109,48 @@ function createRunner(child: ChildProcess, options: { startupMs?: number; timeou
 
 describe('LocalReplyRunner', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('only allows Antigravity replies for chats in the agy CLI store', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-antigravity-home-'));
+    const previousHome = process.env.AGENT_HUB_HOME;
+    process.env.AGENT_HUB_HOME = home;
+    const cliHome = path.join(home, '.gemini', 'antigravity-cli');
+    const runner = new LocalReplyRunner({
+      commands: { codex: 'codex', antigravity: 'agy' },
+      resolve: async () => undefined,
+    });
+    const antigravitySession = (nativeId: string): AgentSession => ({
+      ...session,
+      id: `antigravity:${nativeId}`,
+      agent: 'antigravity',
+      nativeId,
+    });
+
+    try {
+      await mkdir(path.join(cliHome, 'conversations'), { recursive: true });
+      await writeFile(path.join(cliHome, 'conversations', 'cli-db.db'), '');
+      await writeFile(path.join(cliHome, 'conversations', 'cli-pb.pb'), '');
+      await mkdir(path.join(cliHome, 'brain', 'cli-brain'), { recursive: true });
+      await mkdir(path.join(home, '.gemini', 'antigravity', 'conversations'), { recursive: true });
+      await writeFile(path.join(home, '.gemini', 'antigravity', 'conversations', 'ide-only.db'), '');
+      await runner.init();
+
+      expect(runner.canReplyTo(session)).toBe(true);
+      expect(runner.canReplyTo(antigravitySession('cli-db'))).toBe(true);
+      expect(runner.canReplyTo(antigravitySession('cli-pb'))).toBe(true);
+      expect(runner.canReplyTo(antigravitySession('cli-brain'))).toBe(true);
+      const ideSession = antigravitySession('ide-only');
+      expect(runner.canReplyTo(ideSession)).toBe(false);
+      await expect(runner.send(ideSession, text)).rejects.toMatchObject({
+        name: 'ReplyFailedError',
+        message: 'Antigravity can only continue chats started with the agy CLI',
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
+      else process.env.AGENT_HUB_HOME = previousHome;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 
   it('rejects a concurrent reply for the same session as busy', async () => {
     vi.useFakeTimers();
