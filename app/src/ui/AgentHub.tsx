@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft, ArrowUp, ChevronDown, ChevronRight, ExternalLink, GitBranch, LoaderCircle, LogOut, QrCode,
-  Search, Settings, Wifi, WifiOff, Wrench, X,
+  ArrowLeft, ArrowUp, BellRing, ChevronDown, ChevronRight, ExternalLink, Folder, GitBranch, LoaderCircle, LogOut, QrCode,
+  Search, Settings, Sparkles, TerminalSquare, Wifi, WifiOff, X,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -74,6 +74,7 @@ export function AgentHub() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [selectedAgent, setSelectedAgent] = useState<AgentKind | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'needs_input' | 'working'>('all');
   const [selectedId, setSelectedId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -195,8 +196,9 @@ export function AgentHub() {
 
   const filtered = useMemo(() => sessions.filter((session) =>
     (selectedAgent === 'all' || session.agent === selectedAgent) &&
+    (statusFilter === 'all' || session.status === statusFilter) &&
     (!search || `${session.title} ${session.project || ''} ${session.lastMessage || ''}`.toLowerCase().includes(search.toLowerCase())),
-  ).sort(sessionOrder), [sessions, selectedAgent, search]);
+  ).sort(sessionOrder), [sessions, selectedAgent, statusFilter, search]);
   const groups = feedGroups(filtered);
   const selectedSession = sessions.find((session) => session.id === selectedId);
   const counts = useMemo(() => {
@@ -225,6 +227,9 @@ export function AgentHub() {
   const needsCount = sessions.filter((session) => session.status === 'needs_input').length;
   const workingCount = sessions.filter((session) => session.status === 'working').length;
 
+  const todayCount = sessions.filter((session) => Date.now() - Date.parse(session.updatedAt) < 86_400_000).length;
+  const toggleStatus = (value: 'needs_input' | 'working') => setStatusFilter((current) => current === value ? 'all' : value);
+
   return (
     <main className="screen">
       <header className="app-bar">
@@ -237,42 +242,51 @@ export function AgentHub() {
         ) : (
           <>
             <div className="app-title">
+              <span className="eyebrow">
+                <button className={`conn ${connection}`} onClick={() => void refresh()}>
+                  {connection === 'connected' ? <Wifi size={12} /> : connection === 'offline' ? <WifiOff size={12} /> : <LoaderCircle className="spin" size={12} />}
+                  {connection === 'connected' ? 'Live from your PC' : connection === 'offline' ? 'PC offline' : 'Connecting'}
+                </button>
+              </span>
               <h1>Agents</h1>
-              <button className={`conn ${connection}`} onClick={() => void refresh()}>
-                {connection === 'connected' ? <Wifi size={13} /> : connection === 'offline' ? <WifiOff size={13} /> : <LoaderCircle className="spin" size={13} />}
-                {connection === 'connected' ? 'Live' : connection === 'offline' ? 'Offline' : 'Connecting'}
-              </button>
             </div>
-            <button className="icon-btn" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={21} /></button>
-            <button className="icon-btn" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={21} /></button>
+            <button className="icon-btn glass" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={19} /></button>
+            <button className="icon-btn glass" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button>
           </>
         )}
       </header>
+
+      {!search && (
+        <section className="overview" aria-label="Overview">
+          <button className={`stat needs_input${statusFilter === 'needs_input' ? ' active' : ''}`} onClick={() => toggleStatus('needs_input')}>
+            <BellRing size={16} /><strong>{needsCount}</strong><span>Needs you</span>
+          </button>
+          <button className={`stat working${statusFilter === 'working' ? ' active' : ''}`} onClick={() => toggleStatus('working')}>
+            <span className="pulse" /><strong>{workingCount}</strong><span>Working</span>
+          </button>
+          <div className="stat today"><Sparkles size={16} /><strong>{todayCount}</strong><span>Today</span></div>
+        </section>
+      )}
 
       <nav className="tabs" aria-label="Filter by app">
         <button className={selectedAgent === 'all' ? 'tab active' : 'tab'} onClick={() => setSelectedAgent('all')}>All <span>{sessions.length}</span></button>
         {tabs.map((agent) => (
           <button key={agent} className={selectedAgent === agent ? `tab active ${agent}` : `tab ${agent}`} onClick={() => setSelectedAgent(agent)}>
-            {agentLabels[agent]} <span>{counts.get(agent) || 0}</span>
+            <i className={`tab-dot ${agent}`} />{agentLabels[agent]} <span>{counts.get(agent) || 0}</span>
           </button>
         ))}
       </nav>
 
-      {(needsCount > 0 || workingCount > 0) && selectedAgent === 'all' && !search && (
-        <div className="summary">
-          {needsCount > 0 && <span className="pill needs_input">{needsCount} need{needsCount === 1 ? 's' : ''} you</span>}
-          {workingCount > 0 && <span className="pill working">{workingCount} working</span>}
-        </div>
-      )}
-
       <div className="list">
         {filtered.length === 0 ? (
-          <Empty connection={connection} agent={selectedAgent} />
+          statusFilter !== 'all' && connection !== 'offline'
+            ? <div className="empty"><h2>{statusFilter === 'needs_input' ? 'Nothing needs you' : 'No agent is working'}</h2><p>{statusFilter === 'needs_input' ? 'Approvals and questions from your agents show up here.' : 'Running sessions show up here live.'}</p></div>
+            : <Empty connection={connection} agent={selectedAgent} />
         ) : (
           <>
-            {groups.needsYou.length > 0 && <Group title="Needs you" sessions={groups.needsYou} onOpen={setSelectedId} />}
-            {groups.working.length > 0 && <Group title="Working" sessions={groups.working} onOpen={setSelectedId} />}
-            {groups.recent.length > 0 && <Group title="Recent" sessions={groups.recent} onOpen={setSelectedId} />}
+            {groups.needsYou.length > 0 && <Group title="Needs you" tone="needs_input" sessions={groups.needsYou} onOpen={setSelectedId} />}
+            {groups.working.length > 0 && <Group title="Working now" tone="working" sessions={groups.working} onOpen={setSelectedId} />}
+            {dayGroups(groups.recent).map(([title, items]) => <Group key={title} title={title} sessions={items} onOpen={setSelectedId} />)}
           </>
         )}
       </div>
@@ -366,15 +380,29 @@ function Setup({ onPaired }: { onPaired: (pairing: PairingDetails) => void }) {
   );
 }
 
-function Avatar({ agent, status }: { agent: AgentKind; status?: AgentSession['status'] }) {
-  return <span className={`avatar ${agent}`}>{agentInitials[agent]}{status && (status === 'working' || status === 'needs_input') && <i className={`badge ${status}`} />}</span>;
+function dayGroups(sessions: AgentSession[]): Array<[string, AgentSession[]]> {
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  const today = startOfToday.getTime();
+  const buckets: Array<[string, AgentSession[]]> = [['Today', []], ['Yesterday', []], ['This week', []], ['Earlier', []]];
+  sessions.forEach((session) => {
+    const at = Date.parse(session.updatedAt);
+    const index = at >= today ? 0 : at >= today - 86_400_000 ? 1 : at >= today - 6 * 86_400_000 ? 2 : 3;
+    buckets[index]![1].push(session);
+  });
+  return buckets.filter(([, items]) => items.length > 0);
 }
 
-function Group({ title, sessions, onOpen }: { title: string; sessions: AgentSession[]; onOpen: (id: string) => void }) {
+function Avatar({ agent, status, size = 'md' }: { agent: AgentKind; status?: AgentSession['status']; size?: 'sm' | 'md' }) {
+  return <span className={`avatar ${agent} ${size}`}>{agentInitials[agent]}{status && (status === 'working' || status === 'needs_input') && <i className={`badge ${status}`} />}</span>;
+}
+
+function Group({ title, tone, sessions, onOpen }: { title: string; tone?: string; sessions: AgentSession[]; onOpen: (id: string) => void }) {
   return (
-    <section className="group">
+    <section className={`group ${tone || ''}`}>
       <h2>{title} <span>{sessions.length}</span></h2>
-      {sessions.map((session) => <Row key={session.id} session={session} onOpen={() => onOpen(session.id)} />)}
+      <div className="cards">
+        {sessions.map((session) => <Row key={session.id} session={session} onOpen={() => onOpen(session.id)} />)}
+      </div>
     </section>
   );
 }
@@ -386,15 +414,18 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
       <Avatar agent={session.agent} status={session.status} />
       <span className="row-body">
         <span className="row-top">
-          <span className="row-title">{session.title}</span>
+          <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
+          {(session.status === 'needs_input' || session.status === 'working' || session.status === 'error') && <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>}
           <span className="row-time">{relativeTime(session.updatedAt)}</span>
         </span>
-        <span className="row-meta">
-          <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
-          {session.project && <span className="row-project">· {session.project}</span>}
-          {(session.status === 'needs_input' || session.status === 'working' || session.status === 'error') && <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>}
-        </span>
-        {preview && <span className="row-preview">{session.lastRole === 'user' ? 'You: ' : ''}{preview}</span>}
+        <span className="row-title">{session.title}</span>
+        {preview && <span className="row-preview">{session.lastRole === 'user' ? <b>You: </b> : ''}{preview}</span>}
+        {(session.project || session.branch) && (
+          <span className="row-meta">
+            {session.project && <span className="chip"><Folder size={12} />{session.project}</span>}
+            {session.branch && <span className="chip"><GitBranch size={12} />{session.branch}</span>}
+          </span>
+        )}
       </span>
     </button>
   );
@@ -476,12 +507,12 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
     <main className="chat">
       <header className="chat-bar">
         <button className="icon-btn" aria-label="Back" onClick={onBack}><ArrowLeft size={22} /></button>
-        <Avatar agent={session.agent} />
         <div className="chat-heading">
           <strong>{session.title}</strong>
           <span>
-            <span className={`dot ${session.status}`} />{statusLabels[session.status]} · {agentLabels[session.agent]}
-            {session.branch && <> · <GitBranch size={11} /> {session.branch}</>}
+            <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
+            <span className={`dot ${session.status}`} />{statusLabels[session.status]}
+            {session.project && <> · {session.project}</>}
           </span>
         </div>
         {session.url && <a className="icon-btn" href={session.url} target="_blank" rel="noreferrer" aria-label={openLabel}><ExternalLink size={20} /></a>}
@@ -493,12 +524,19 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
       }}>
         {loading && !messages.length && <div className="chat-empty"><LoaderCircle className="spin" size={22} /></div>}
         {!loading && !items.length && <div className="chat-empty">No messages in this chat yet.</div>}
-        {items.map((item) => item.kind === 'tools'
-          ? <ToolBlock key={`t-${item.index}`} messages={item.messages} />
-          : item.message.role === 'user'
-            ? <div key={`m-${item.index}`} className="msg user"><div className="bubble"><Markdown text={item.message.text} /></div></div>
-            : <div key={`m-${item.index}`} className="msg assistant"><Avatar agent={session.agent} /><div className="assistant-text"><Markdown text={item.message.text} /></div></div>)}
-        {session.status === 'working' && <div className="typing"><span /><span /><span /></div>}
+        {items.map((item, position) => {
+          if (item.kind === 'tools') return <ToolBlock key={`t-${item.index}`} messages={item.messages} />;
+          if (item.message.role === 'user') return <div key={`m-${item.index}`} className="msg user"><div className="bubble"><Markdown text={item.message.text} /></div></div>;
+          const previous = items[position - 1];
+          const startsTurn = !previous || (previous.kind === 'message' && previous.message.role === 'user');
+          return (
+            <div key={`m-${item.index}`} className="msg assistant">
+              {startsTurn && <div className="speaker"><Avatar agent={session.agent} size="sm" />{agentLabels[session.agent]}</div>}
+              <div className="assistant-text"><Markdown text={item.message.text} /></div>
+            </div>
+          );
+        })}
+        {session.status === 'working' && <div className="thinking"><Avatar agent={session.agent} size="sm" /><span>{agentLabels[session.agent]} is working…</span></div>}
         <div ref={bottom} />
       </div>
 
@@ -530,11 +568,11 @@ function ToolBlock({ messages }: { messages: SessionMessage[] }) {
   return (
     <div className="tool">
       <button className="tool-head" onClick={() => setOpen((value) => !value)}>
-        <Wrench size={14} />
-        <span>{messages.length === 1 ? first || 'Tool step' : `${messages.length} tool steps`}</span>
+        <TerminalSquare size={15} />
+        <span>{messages.length === 1 ? first || 'Ran a tool' : `Ran ${messages.length} tools`}</span>
         <ChevronRight size={15} className={open ? 'rot' : ''} />
       </button>
-      {open && messages.map((message, index) => <pre key={index}>{message.text.slice(0, 4000)}</pre>)}
+      {open && <div className="tool-steps">{messages.map((message, index) => <pre key={index}>{message.text.slice(0, 4000)}</pre>)}</div>}
     </div>
   );
 }
