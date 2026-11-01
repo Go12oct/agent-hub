@@ -1,4 +1,7 @@
 import type { AgentSession } from '@agent-hub/shared';
+import { hmac } from '@noble/hashes/hmac';
+import { sha256 } from '@noble/hashes/sha256';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 
 export interface PairingDetails {
   url: string;
@@ -46,15 +49,7 @@ export function newNonce(): string {
 
 export async function verifyHubProof(token: string, nonce: string, proof: unknown): Promise<boolean> {
   if (typeof proof !== 'string' || !/^[0-9a-f]{64}$/i.test(proof)) return false;
-  const key = await globalThis.crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(token),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = new Uint8Array(await globalThis.crypto.subtle.sign('HMAC', key, new TextEncoder().encode(nonce)));
-  const expected = [...signature].map((value) => value.toString(16).padStart(2, '0')).join('');
+  const expected = bytesToHex(hmac(sha256, utf8ToBytes(token), utf8ToBytes(nonce)));
   const actual = proof.toLowerCase();
   let difference = 0;
   for (let index = 0; index < expected.length; index++) {

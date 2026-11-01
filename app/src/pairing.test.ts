@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import type { AgentSession } from '@agent-hub/shared';
 import {
@@ -55,7 +55,21 @@ describe('hub identity proof', () => {
     const proof = createHmac('sha256', token).update(nonce).digest('hex');
     expect(nonce).toMatch(/^[0-9a-f]{32}$/);
     expect(await verifyHubProof(token, nonce, proof)).toBe(true);
-    expect(await verifyHubProof(token, nonce, `${proof.slice(0, -1)}0`)).toBe(false);
+    const invalidProof = `${proof[0] === '0' ? '1' : '0'}${proof.slice(1)}`;
+    expect(await verifyHubProof(token, nonce, invalidProof)).toBe(false);
     expect(await verifyHubProof(token, nonce, 'not-a-proof')).toBe(false);
+  });
+
+  it('verifies proofs when WebCrypto subtle is unavailable', async () => {
+    const token = 'local-hub-token';
+    const nonce = 'abcdef0123456789';
+    const proof = createHmac('sha256', token).update(nonce).digest('hex');
+    vi.stubGlobal('crypto', { subtle: undefined });
+    try {
+      expect(globalThis.crypto.subtle).toBeUndefined();
+      expect(await verifyHubProof(token, nonce, proof)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
