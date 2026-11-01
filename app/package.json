@@ -9,13 +9,16 @@
   "dependencies": {
     "@agent-hub/shared": "*",
     "@capacitor/android": "^7.2.0",
+    "@capacitor/app": "^7.1.2",
     "@capacitor/barcode-scanner": "^2.0.0",
     "@capacitor/core": "^7.2.0",
     "@capacitor/local-notifications": "^7.0.1",
     "@capacitor/preferences": "^7.0.1",
     "lucide-react": "^0.468.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.2.0",
