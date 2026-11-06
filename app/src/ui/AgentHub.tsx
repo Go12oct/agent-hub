@@ -223,6 +223,19 @@ export function AgentHub() {
     return () => remove?.();
   }, []);
 
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let remove: (() => void) | undefined;
+    void import('@capacitor/local-notifications').then(async ({ LocalNotifications }) => {
+      const handle = await LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+        const id = (action.notification.extra as { sessionId?: unknown } | undefined)?.sessionId;
+        if (typeof id === 'string' && id) { setSettingsOpen(false); setSearchOpen(false); setSearch(''); setSelectedId(id); }
+      });
+      remove = () => { void handle.remove(); };
+    }).catch(() => {});
+    return () => remove?.();
+  }, []);
+
   const filtered = useMemo(() => sessions.filter((session) =>
     (selectedAgent === 'all' || session.agent === selectedAgent) &&
     (statusFilter === 'all' || session.status === statusFilter) &&
