@@ -6,6 +6,11 @@ import { configDirectory, loadConfig } from './config.js';
 import type { HubConfig } from './config.js';
 
 const events = ['UserPromptSubmit', 'PreToolUse', 'SubagentStart', 'Notification', 'Stop', 'PermissionRequest', 'StopFailure', 'SessionEnd'];
+export const defaultApprovalHoldSeconds = 300;
+
+export function approvalHookTimeout(config: Pick<HubConfig, 'approvals'>): number {
+  return Math.max(60, (config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) + 60);
+}
 
 function hooksUrl(config: HubConfig): string {
   return `http://127.0.0.1:${config.port}/hooks/claude?token=${encodeURIComponent(config.token)}`;
@@ -30,8 +35,17 @@ export async function installClaudeHooks(settingsPath = userSettingsPath(), conf
   const url = hooksUrl(config);
   for (const event of events) {
     const entries = Array.isArray(hooks[event]) ? hooks[event] : [];
-    const exists = entries.some((entry: any) => (entry.hooks || []).some((hook: any) => hook.type === 'http' && hook.url === url));
-    if (!exists) entries.push({ hooks: [{ type: 'http', url }] });
+    const ours = (hook: any) => hook.type === 'http' && hook.url === url;
+    const hook: Record<string, unknown> = event === 'PermissionRequest'
+      ? { type: 'http', url, timeout: approvalHookTimeout(config) }
+      : { type: 'http', url };
+    const exists = entries.some((entry: any) => (entry.hooks || []).some(ours));
+    if (!exists) entries.push({ hooks: [hook] });
+    else {
+      for (const entry of entries) {
+        entry.hooks = (entry.hooks || []).map((existing: any) => (ours(existing) ? hook : existing));
+      }
+    }
     hooks[event] = entries;
   }
   settings.hooks = hooks;

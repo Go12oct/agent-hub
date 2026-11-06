@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft, ArrowUp, BellRing, ChevronDown, ChevronRight, ExternalLink, Folder, GitBranch, LoaderCircle, LogOut, QrCode,
+  ArrowLeft, ArrowUp, BellRing, Check, ShieldAlert, ChevronDown, ChevronRight, ExternalLink, Folder, GitBranch, LoaderCircle, LogOut, QrCode,
   Search, Settings, Sparkles, TerminalSquare, Wifi, WifiOff, X,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -58,6 +58,13 @@ async function reachable(url: string, token: string, timeout = 4000): Promise<bo
   }
 }
 
+export function sessionIdFromLink(link?: string | null): string | undefined {
+  if (!link) return undefined;
+  const match = /^agenthub:\/\/session\/(.+)$/.exec(link.trim());
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]!); } catch { return undefined; }
+}
+
 function relativeTime(value?: string): string {
   if (!value) return '';
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
@@ -82,6 +89,7 @@ export function AgentHub() {
   const pairingRef = useRef<PairingDetails | undefined>(undefined);
   const failingOver = useRef(false);
   const previousStatuses = useRef(new Map<string, AgentSession['status']>());
+  const previousApprovals = useRef(new Map<string, string | undefined>());
   pairingRef.current = pairing;
 
   useEffect(() => { void loadPairing().then((value) => { setPairing(value); setReady(true); }); }, []);
@@ -156,11 +164,14 @@ export function AgentHub() {
       setSessions((existing) => [session, ...existing.filter((item) => item.id !== session.id)]);
       const previous = previousStatuses.current.get(session.id);
       previousStatuses.current.set(session.id, session.status);
-      if (Capacitor.isNativePlatform() && previous !== 'needs_input' && session.status === 'needs_input') {
+      const previousApproval = previousApprovals.current.get(session.id);
+      previousApprovals.current.set(session.id, session.approval?.id);
+      const newApproval = Boolean(session.approval) && previousApproval !== session.approval?.id;
+      if (Capacitor.isNativePlatform() && ((previous !== 'needs_input' && session.status === 'needs_input') || newApproval)) {
         void import('@capacitor/local-notifications').then(async ({ LocalNotifications }) => {
           const permission = await LocalNotifications.checkPermissions();
           if (permission.display !== 'granted') await LocalNotifications.requestPermissions();
-          await LocalNotifications.schedule({ notifications: [{ id: Math.floor(Math.random() * 2_000_000_000), title: `${agentLabels[session.agent]} needs you`, body: session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title }] });
+          await LocalNotifications.schedule({ notifications: [{ id: Math.floor(Math.random() * 2_000_000_000), title: session.approval ? `${agentLabels[session.agent]} wants permission` : `${agentLabels[session.agent]} needs you`, body: session.approval ? session.approval.summary.slice(0, 160) : session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title, extra: { sessionId: session.id } }] });
         }).catch(() => {});
       }
     });
@@ -182,6 +193,12 @@ export function AgentHub() {
     if (!Capacitor.isNativePlatform()) return;
     let remove: (() => void) | undefined;
     void import('@capacitor/app').then(async ({ App }) => {
+      const openLink = (link?: string | null) => {
+        const id = sessionIdFromLink(link);
+        if (id) { setSettingsOpen(false); setSearchOpen(false); setSelectedId(id); }
+      };
+      void App.getLaunchUrl().then((launch) => openLink(launch?.url)).catch(() => {});
+      const urlHandle = await App.addListener('appUrlOpen', (event) => openLink(event.url));
       const handle = await App.addListener('backButton', () => {
         const state = backState.current;
         if (state.selectedId) setSelectedId(undefined);
@@ -189,7 +206,7 @@ export function AgentHub() {
         else if (state.searchOpen) { setSearchOpen(false); setSearch(''); }
         else void App.minimizeApp();
       });
-      remove = () => void handle.remove();
+      remove = () => { void handle.remove(); void urlHandle.remove(); };
     }).catch(() => {});
     return () => remove?.();
   }, []);
@@ -548,6 +565,7 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
         <div ref={bottom} />
       </div>
 
+      {session.approval && <ApprovalCard session={session} pairing={pairing} />}
       {canReply ? (
         <footer className="composer">
           {(sendError || (!sending && session.replyError)) && (
@@ -569,6 +587,49 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
         </footer>
       )}
     </main>
+  );
+}
+
+function ApprovalCard({ session, pairing }: { session: AgentSession; pairing: PairingDetails }) {
+  const approval = session.approval!;
+  const [busy, setBusy] = useState<'allow' | 'deny' | undefined>();
+  const [error, setError] = useState('');
+  useEffect(() => { setBusy(undefined); setError(''); }, [approval.id]);
+  async function decide(decision: 'allow' | 'deny') {
+    if (busy) return;
+    setBusy(decision);
+    setError('');
+    try {
+      const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/approval`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, approvalId: approval.id }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: unknown };
+        setError(typeof body.error === 'string' ? body.error : 'Could not send your answer. Try again.');
+        setBusy(undefined);
+      }
+    } catch {
+      setError('Could not reach your PC. Try again.');
+      setBusy(undefined);
+    }
+  }
+  return (
+    <section className="approval" aria-live="polite">
+      <div className="approval-head"><ShieldAlert size={18} /><span>{agentLabels[session.agent]} wants permission</span></div>
+      <code className="approval-summary">{approval.summary}</code>
+      {approval.detail && <p className="approval-detail">{approval.detail}</p>}
+      {error && <div className="error small">{error}</div>}
+      <div className="approval-actions">
+        <button className="secondary deny" disabled={Boolean(busy)} onClick={() => void decide('deny')}>
+          {busy === 'deny' ? <LoaderCircle className="spin" size={18} /> : <X size={18} />} Deny
+        </button>
+        <button className="primary allow" disabled={Boolean(busy)} onClick={() => void decide('allow')}>
+          {busy === 'allow' ? <LoaderCircle className="spin" size={18} /> : <Check size={18} />} Allow
+        </button>
+      </div>
+    </section>
   );
 }
 

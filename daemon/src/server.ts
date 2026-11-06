@@ -15,6 +15,8 @@ import { CodexCloudCollector } from './collectors/codex-cloud.js';
 import type { HubConfig } from './config.js';
 import { LocalReplyRunner, ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner } from './local-replies.js';
 import { NtfyNotifier } from './notifications.js';
+import { ApprovalBroker, hookDecisionBody, type ApprovalDecision } from './approvals.js';
+import { defaultApprovalHoldSeconds } from './claude-hooks.js';
 
 export interface HubRuntime {
   app: FastifyInstance;
@@ -82,19 +84,24 @@ export function createHub(
     },
   }));
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
+  const approvals = new ApprovalBroker();
+  const approvalsEnabled = config.approvals?.enabled !== false;
+  const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
   const eventClients = new Set<{ write: (data: string) => void }>();
 
   const present = (session: AgentSession): AgentSession => {
     const failure = replyRunner?.failure(session.id);
+    const approval = approvals.pending(session.id);
     return {
       ...session,
+      ...(approval ? { approval, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
       canReply: session.agent === 'devin'
         ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
         : isReplyAgent(session.agent) && Boolean(
           replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
         ),
       replyError: failure && Date.parse(failure.at) >= Date.parse(session.updatedAt) ? failure.error : undefined,
-      status: replyRunner?.isRunning(session.id) ? 'working' : session.status,
+      ...(approval ? {} : { status: replyRunner?.isRunning(session.id) ? 'working' as const : session.status }),
     };
   };
   const broadcast = (session: AgentSession) => {
@@ -103,7 +110,13 @@ export function createHub(
   };
   const emit: import('./collectors/types.js').EmitSession = (session) => {
     sessions.set(session.id, session);
-    void notifier.update(session);
+    void notifier.update(present(session));
+    broadcast(session);
+  };
+  approvals.onChange = (id) => {
+    const session = sessions.get(id);
+    if (!session) return;
+    void notifier.update(present(session));
     broadcast(session);
   };
   emit.remove = (id) => {
@@ -214,9 +227,37 @@ export function createHub(
       eventClients.delete(client);
     });
   });
-  app.post<{ Body: Record<string, unknown> }>('/hooks/claude', async (request) => {
-    await claude.applyHook((request.body || {}) as ClaudeHookPayload, emit);
-    return { ok: true };
+  app.post<{ Params: { id: string }; Body: { decision?: unknown; approvalId?: unknown } }>('/api/sessions/:id/approval', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    const decision = request.body?.decision;
+    if (decision !== 'allow' && decision !== 'deny') {
+      return reply.code(400).send({ error: 'decision must be "allow" or "deny"' });
+    }
+    const approvalId = typeof request.body?.approvalId === 'string' ? request.body.approvalId : undefined;
+    const result = approvals.decide(session.id, approvalId, decision as ApprovalDecision);
+    if (result === 'none') return reply.code(409).send({ error: 'That request is no longer waiting. It may have been answered on the PC.' });
+    if (result === 'stale') return reply.code(409).send({ error: 'A newer request replaced this one. Check the chat again.' });
+    return reply.code(204).send();
+  });
+  app.post<{ Body: Record<string, unknown> }>('/hooks/claude', async (request, reply) => {
+    const payload = (request.body || {}) as ClaudeHookPayload & { tool_name?: unknown; tool_input?: unknown };
+    await claude.applyHook(payload, emit);
+    if (!payload.session_id) return { ok: true };
+    const sessionId = `claude-code:${payload.session_id}`;
+    if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
+      approvals.cancel(sessionId);
+      return { ok: true };
+    }
+    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'a tool';
+    const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input as Record<string, unknown> : undefined;
+    const { outcome } = approvals.hold(sessionId, toolName, toolInput, approvalHoldMs);
+    reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(sessionId); });
+    const result = await outcome;
+    if (result === 'allow' || result === 'deny') {
+      await claude.applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);
+    }
+    return hookDecisionBody(result);
   });
   const staticCandidates = [
     path.join(path.dirname(path.resolve(process.argv[1] || process.execPath)), 'public'),
@@ -234,6 +275,7 @@ export function createHub(
     collectors,
     ready,
     async close() {
+      approvals.cancelAll();
       await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
       await app.close();
     },

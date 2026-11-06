@@ -60,11 +60,26 @@ running. Tailscale's personal plan is free for typical personal use.
 
 ### Optional background push
 
-Install the ntfy Android app, choose a private topic, and configure it with
+Install the ntfy Android app (free, from F-Droid or GitHub Releases; no Play
+Store needed), subscribe to a private topic, and configure it with
 `agent-hub config set ntfy.topic <topic>`. Agent Hub publishes transitions to
-needs-input, done, and error to `https://ntfy.sh/<topic>`. Anyone who knows a
-public ntfy topic can read messages sent to it; choose a hard-to-guess topic or
-configure a private ntfy server.
+needs-input, done, and error to `https://ntfy.sh/<topic>`, and each permission
+request Claude Code makes. Tapping an alert opens that chat in Agent Hub
+(`agenthub://session/<id>`). Anyone who knows a public ntfy topic can read
+messages sent to it; choose a hard-to-guess topic, or point Agent Hub at your
+own server with `agent-hub config set ntfy.server https://ntfy.example.com`.
+Only the agent name, project, status and a one-line summary are sent; the
+transcript stays on your PC.
+
+### Allow or deny Claude Code from your phone
+
+After `agent-hub install-claude-hooks`, Claude Code's `PermissionRequest` hook
+waits on Agent Hub. The chat shows what Claude wants to run with Allow and Deny
+buttons; your answer is returned to Claude as the hook decision. If you do not
+answer within five minutes (`agent-hub config set approvals.holdSeconds 300`),
+Claude falls back to its normal prompt on the PC, and anything answered on the
+PC first clears the request on the phone. Nothing is approved automatically.
+Set `approvals.enabled false` to go back to notify-only.
 
 ## Supported sources
 

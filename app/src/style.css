@@ -205,3 +205,12 @@ a { color: var(--accent); }
 @media (min-width: 900px) {
   .screen, .chat { max-width: 760px; margin: 0 auto; }
 }
+
+.approval { margin: 0 12px 6px; padding: 14px; border: 1px solid rgba(255, 173, 92, .45); border-radius: 18px; background: rgba(255, 173, 92, .08); }
+.approval-head { display: flex; align-items: center; gap: 8px; color: var(--needs); font-weight: 650; font-size: 15px; }
+.approval-summary { display: block; margin: 10px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.approval-detail { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.approval-actions { display: flex; gap: 10px; margin-top: 12px; }
+.approval-actions button { flex: 1; min-height: 46px; font-size: 16px; }
+.approval-actions .allow { background: var(--working); color: #062b14; }
+.approval-actions .deny { border: 1px solid var(--line-strong); }
