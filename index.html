@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Hub: one live feed for your coding agents</title>
+<meta name="description" content="Agent Hub runs locally on your Windows PC and gives you one live feed of Codex, Claude Code, Antigravity and Devin sessions on your phone and browser.">
+<meta property="og:title" content="Agent Hub">
+<meta property="og:description" content="One live feed for coding-agent sessions on your PC, Android phone, and browser.">
+<meta name="theme-color" content="#0b0d12">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%236d5efc'/><circle cx='34' cy='50' r='9' fill='white'/><circle cx='66' cy='34' r='9' fill='white'/><circle cx='66' cy='66' r='9' fill='white'/></svg>">
+<style>
+:root{--bg:#0b0d12;--card:#141821;--line:#232937;--text:#e8ebf2;--muted:#9aa3b5;--accent:#6d5efc;--accent2:#22c3a6}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:radial-gradient(1200px 600px at 50% -200px,#1d1b4a 0,transparent 70%),var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow-x:hidden}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:var(--text);text-decoration:none}
+.logo i{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+nav a.gh{color:var(--muted);text-decoration:none;font-size:15px}
+header{padding:56px 0 40px;text-align:center}
+h1{font-size:clamp(34px,7vw,60px);line-height:1.08;margin:0 0 18px;letter-spacing:-.02em}
+h1 span{background:linear-gradient(90deg,#a99dff,var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{color:var(--muted);font-size:clamp(17px,2.6vw,20px);max-width:640px;margin:0 auto 30px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:13px 22px;border-radius:12px;font-weight:600;text-decoration:none;border:1px solid var(--line);color:var(--text);background:var(--card)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.feed{max-width:520px;margin:48px auto 0;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:8px;text-align:left}
+.row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px}
+.row+.row{border-top:1px solid var(--line)}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.row b{font-weight:600;font-size:15px;display:block}.row small{color:var(--muted);font-size:13px}
+.tag{margin-left:auto;font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+section{padding:56px 0}
+h2{font-size:clamp(24px,4vw,32px);margin:0 0 22px;letter-spacing:-.01em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px}
+.card h3{margin:0 0 6px;font-size:17px}.card p{margin:0;color:var(--muted);font-size:15px}
+ol{padding-left:22px;color:var(--muted)}ol li{margin:8px 0}ol b{color:var(--text)}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;background:#0f1218;border:1px solid var(--line);padding:2px 6px;border-radius:6px;color:#cfd6ff;word-break:break-word}
+pre{background:#0f1218;border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow-x:auto;font-size:14px;color:#cfd6ff;margin:14px 0 0}
+footer{border-top:1px solid var(--line);padding:28px 0 40px;color:var(--muted);font-size:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav><a class="logo" href="/"><i></i>Agent Hub</a><a class="gh" href="https://github.com/Go12oct/agent-hub">GitHub &rarr;</a></nav>
+<header>
+<h1>One live feed for<br><span>all your coding agents</span></h1>
+<p class="lead">Agent Hub runs locally on your Windows PC and shows your Codex, Claude Code, Antigravity and Devin sessions in one place: on your Android phone, or in any browser.</p>
+<div class="cta"><a class="btn primary" href="https://github.com/Go12oct/agent-hub#windows-quick-start">Get started</a><a class="btn" href="https://github.com/Go12oct/agent-hub">View source</a></div>
+<div class="feed" aria-hidden="true">
+<div class="row"><span class="dot" style="background:#f5a524"></span><div><b>Refactor auth middleware</b><small>Claude Code &middot; 2m ago</small></div><span class="tag">Needs you</span></div>
+<div class="row"><span class="dot" style="background:#22c3a6"></span><div><b>Fix flaky upload test</b><small>Codex CLI &middot; running</small></div><span class="tag">Working</span></div>
+<div class="row"><span class="dot" style="background:#6d5efc"></span><div><b>Add Stripe webhooks</b><small>Devin &middot; 14m ago</small></div><span class="tag">Done</span></div>
+</div>
+</header>
+
+<section>
+<h2>Why Agent Hub</h2>
+<div class="grid">
+<div class="card"><h3>Local first</h3><p>A small daemon on your PC reads agent transcripts directly. Nothing is uploaded to a hosted service.</p></div>
+<div class="card"><h3>Phone-ready</h3><p>Pair the Android app with a QR code and follow every session over your LAN or Tailscale.</p></div>
+<div class="card"><h3>Many agents</h3><p>Codex CLI and desktop, Claude Code with hooks, Antigravity, and Devin through its API.</p></div>
+<div class="card"><h3>Push alerts</h3><p>Optional ntfy notifications when a session needs input, finishes, or errors.</p></div>
+</div>
+</section>
+
+<section>
+<h2>Quick start (Windows)</h2>
+<ol>
+<li><b>Install Node.js 22+</b> (LTS).</li>
+<li><b>Download</b> <code>agent-hub-windows.zip</code> from the releases, extract it, and run the installer:
+<pre>Set-ExecutionPolicy -Scope Process Bypass
+.\agent-hub\scripts\install.ps1</pre></li>
+<li><b>Scan the QR code</b> it prints with the Agent Hub Android app, or open <code>http://localhost:4747</code> in your browser.</li>
+<li><b>Optional:</b> <code>agent-hub config set devinApiKey apk_user_...</code> and <code>agent-hub config set ntfy.topic &lt;topic&gt;</code></li>
+</ol>
+</section>
+
+<footer><span>Agent Hub &middot; MIT licensed</span><span><a href="https://github.com/Go12oct/agent-hub">GitHub</a> &middot; <a href="https://github.com/Go12oct/agent-hub/releases">Releases</a></span></footer>
+</div>
+</body>
+</html>
