@@ -247,12 +247,12 @@ export function createHub(
     if (!payload.session_id) return { ok: true };
     const sessionId = `claude-code:${payload.session_id}`;
     const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
+    const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input as Record<string, unknown> : undefined;
     if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
-      if (payload.hook_event_name === 'PreToolUse') approvals.cancelSession(sessionId, toolName);
+      if (payload.hook_event_name === 'PreToolUse' && toolName) approvals.cancelSession(sessionId, { name: toolName, input: toolInput });
       else if (['UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd'].includes(payload.hook_event_name || '')) approvals.cancelSession(sessionId);
       return { ok: true };
     }
-    const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input as Record<string, unknown> : undefined;
     const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
     reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
     const result = await outcome;

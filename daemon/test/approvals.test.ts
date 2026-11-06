@@ -59,10 +59,19 @@ describe('approval broker', () => {
       expect(broker.decide('s1', write.approval.id, 'deny')).toBe('ok');
       await expect(write.outcome).resolves.toBe('deny');
       expect(broker.pending('s1').map((item) => item.toolName)).toEqual(['Bash']);
-      broker.cancelSession('s1', 'Edit');
+      broker.cancelSession('s1', { name: 'Edit' });
       expect(broker.pending('s1')).toHaveLength(1);
-      broker.cancelSession('s1', 'Bash');
+      const second = broker.hold('s1', 'Bash', { command: 'git status' }, 1000);
+      broker.cancelSession('s1', { name: 'Bash', input: { command: 'git status' } });
+      await expect(second.outcome).resolves.toBe('cancelled');
+      expect(broker.pending('s1').map((item) => item.summary)).toEqual(['Run: npm test']);
+      const third = broker.hold('s1', 'Bash', { command: 'git log' }, 1000);
+      broker.cancelSession('s1', { name: 'Bash' });
+      expect(broker.pending('s1')).toHaveLength(2);
+      broker.cancelSession('s1', { name: 'Bash', input: { command: 'npm test' } });
       await expect(bash.outcome).resolves.toBe('cancelled');
+      broker.cancelSession('s1', { name: 'Bash' });
+      await expect(third.outcome).resolves.toBe('cancelled');
 
       const timed = broker.hold('s2', 'Bash', {}, 1000);
       vi.advanceTimersByTime(1001);
@@ -120,8 +129,12 @@ describe('ntfy notifications', () => {
     expect(String((init.headers as Record<string, string>).Title)).toMatch(/^[\x20-\x7E]+$/);
 
     const approval = { id: 'ap1', toolName: 'Bash', summary: 'Run: ls', requestedAt: new Date().toISOString() };
-    await notifier.update(session({ approval }));
-    await notifier.update(session({ approval: { ...approval, id: 'ap2' } }));
+    await notifier.update(session({ approval, approvals: [approval] }));
+    const write = { ...approval, id: 'ap2', toolName: 'Write' };
+    await notifier.update(session({ approval, approvals: [approval, write] }));
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(String((fetchImpl.mock.calls[2] as unknown as [string, RequestInit])[1].body)).toContain('Write');
+    await notifier.update(session({ approval, approvals: [approval, write] }));
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 });
@@ -199,7 +212,7 @@ describe('Claude approvals over HTTP', () => {
       expect((still.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1')?.approval?.toolName).toBe('Bash');
       await runtime.app.inject({
         method: 'POST', url: '/hooks/claude?token=test-token',
-        payload: { session_id: 'perm-1', hook_event_name: 'PreToolUse', cwd: '/tmp/project', tool_name: 'Bash' },
+        payload: { session_id: 'perm-1', hook_event_name: 'PreToolUse', cwd: '/tmp/project', tool_name: 'Bash', tool_input: permissionRequest.tool_input },
       });
       expect((await held).json()).toEqual({});
       const list = await runtime.app.inject({ url: '/api/sessions', headers: auth });

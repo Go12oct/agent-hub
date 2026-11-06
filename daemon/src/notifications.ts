@@ -27,20 +27,22 @@ export function ntfyMessage(session: AgentSession): { title: string; body: strin
 }
 
 export class NtfyNotifier {
-  private previous = new Map<string, { status: SessionStatus; approvalId?: string }>();
+  private previous = new Map<string, { status: SessionStatus; approvalIds: Set<string> }>();
   private sentAt = new Map<string, number>();
   constructor(private config?: { server?: string; topic: string }, private fetchImpl: typeof fetch = fetch) {}
 
   async update(session: AgentSession): Promise<void> {
     const previous = this.previous.get(session.id);
-    this.previous.set(session.id, { status: session.status, approvalId: session.approval?.id });
+    const approvals = session.approvals ?? (session.approval ? [session.approval] : []);
+    this.previous.set(session.id, { status: session.status, approvalIds: new Set(approvals.map((item) => item.id)) });
     if (!this.config?.topic) return;
-    const changed = previous?.status !== session.status || (session.approval && previous?.approvalId !== session.approval.id);
+    const newApproval = approvals.find((item) => !previous?.approvalIds.has(item.id));
+    const changed = previous?.status !== session.status || Boolean(newApproval);
     if (!changed || !['needs_input', 'done', 'error'].includes(session.status)) return;
     const now = Date.now();
-    if (!session.approval && now - (this.sentAt.get(session.id) || 0) < 30_000) return;
+    if (!newApproval && now - (this.sentAt.get(session.id) || 0) < 30_000) return;
     this.sentAt.set(session.id, now);
-    const message = ntfyMessage(session);
+    const message = ntfyMessage(newApproval ? { ...session, approval: newApproval } : { ...session, approval: undefined });
     try {
       await this.fetchImpl(`${(this.config.server || defaultNtfyServer).replace(/\/$/, '')}/${encodeURIComponent(this.config.topic)}`, {
         method: 'POST',

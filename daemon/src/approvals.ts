@@ -7,7 +7,12 @@ export type ApprovalOutcome = ApprovalDecision | 'timeout' | 'cancelled';
 interface Held {
   approval: PendingApproval;
   sessionId: string;
+  inputKey: string;
   resolve: (outcome: ApprovalOutcome) => void;
+}
+
+export function inputKey(toolName: string, input: Record<string, unknown> | undefined): string {
+  return `${toolName}\u0000${JSON.stringify(input ?? {})}`;
 }
 
 export function summarizeToolRequest(toolName: string, input: Record<string, unknown> = {}): { summary: string; detail?: string } {
@@ -51,7 +56,7 @@ export class ApprovalBroker {
       this.onChange?.(sessionId);
     };
     timer = setTimeout(() => resolve('timeout'), holdMs);
-    this.held.set(approval.id, { approval, sessionId, resolve });
+    this.held.set(approval.id, { approval, sessionId, inputKey: inputKey(toolName, input), resolve });
     this.onChange?.(sessionId);
     return { approval, outcome };
   }
@@ -73,14 +78,16 @@ export class ApprovalBroker {
     this.held.get(approvalId)?.resolve('cancelled');
   }
 
-  cancelSession(sessionId: string, toolName?: string): void {
+  cancelSession(sessionId: string, tool?: { name: string; input?: Record<string, unknown> }): void {
     const mine = [...this.held.values()].filter((held) => held.sessionId === sessionId);
-    if (toolName) {
-      const match = mine.find((held) => held.approval.toolName === toolName);
-      if (match) match.resolve('cancelled');
+    if (!tool) {
+      for (const held of mine) held.resolve('cancelled');
       return;
     }
-    for (const held of mine) held.resolve('cancelled');
+    const exact = mine.find((held) => held.inputKey === inputKey(tool.name, tool.input));
+    if (exact) { exact.resolve('cancelled'); return; }
+    const sameTool = mine.filter((held) => held.approval.toolName === tool.name);
+    if (sameTool.length === 1) sameTool[0]!.resolve('cancelled');
   }
 
   cancelAll(): void {

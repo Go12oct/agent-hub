@@ -89,7 +89,7 @@ export function AgentHub() {
   const pairingRef = useRef<PairingDetails | undefined>(undefined);
   const failingOver = useRef(false);
   const previousStatuses = useRef(new Map<string, AgentSession['status']>());
-  const previousApprovals = useRef(new Map<string, string | undefined>());
+  const previousApprovals = useRef(new Map<string, Set<string>>());
   pairingRef.current = pairing;
 
   useEffect(() => { void loadPairing().then((value) => { setPairing(value); setReady(true); }); }, []);
@@ -164,14 +164,16 @@ export function AgentHub() {
       setSessions((existing) => [session, ...existing.filter((item) => item.id !== session.id)]);
       const previous = previousStatuses.current.get(session.id);
       previousStatuses.current.set(session.id, session.status);
-      const previousApproval = previousApprovals.current.get(session.id);
-      previousApprovals.current.set(session.id, session.approval?.id);
-      const newApproval = Boolean(session.approval) && previousApproval !== session.approval?.id;
+      const pendingApprovals = session.approvals ?? (session.approval ? [session.approval] : []);
+      const seenApprovals = previousApprovals.current.get(session.id) ?? new Set<string>();
+      previousApprovals.current.set(session.id, new Set(pendingApprovals.map((item) => item.id)));
+      const freshApproval = pendingApprovals.find((item) => !seenApprovals.has(item.id));
+      const newApproval = Boolean(freshApproval);
       if (Capacitor.isNativePlatform() && ((previous !== 'needs_input' && session.status === 'needs_input') || newApproval)) {
         void import('@capacitor/local-notifications').then(async ({ LocalNotifications }) => {
           const permission = await LocalNotifications.checkPermissions();
           if (permission.display !== 'granted') await LocalNotifications.requestPermissions();
-          await LocalNotifications.schedule({ notifications: [{ id: Math.floor(Math.random() * 2_000_000_000), title: session.approval ? `${agentLabels[session.agent]} wants permission` : `${agentLabels[session.agent]} needs you`, body: session.approval ? session.approval.summary.slice(0, 160) : session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title, extra: { sessionId: session.id } }] });
+          await LocalNotifications.schedule({ notifications: [{ id: Math.floor(Math.random() * 2_000_000_000), title: freshApproval ? `${agentLabels[session.agent]} wants permission` : `${agentLabels[session.agent]} needs you`, body: freshApproval ? freshApproval.summary.slice(0, 160) : session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title, extra: { sessionId: session.id } }] });
         }).catch(() => {});
       }
     });
