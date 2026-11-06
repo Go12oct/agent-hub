@@ -91,10 +91,11 @@ export function createHub(
 
   const present = (session: AgentSession): AgentSession => {
     const failure = replyRunner?.failure(session.id);
-    const approval = approvals.pending(session.id);
+    const pending = approvals.pending(session.id);
+    const approval = pending[0];
     return {
       ...session,
-      ...(approval ? { approval, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
+      ...(approval ? { approval, approvals: pending, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
       canReply: session.agent === 'devin'
         ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
         : isReplyAgent(session.agent) && Boolean(
@@ -245,14 +246,15 @@ export function createHub(
     await claude.applyHook(payload, emit);
     if (!payload.session_id) return { ok: true };
     const sessionId = `claude-code:${payload.session_id}`;
+    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
     if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
-      approvals.cancel(sessionId);
+      if (payload.hook_event_name === 'PreToolUse') approvals.cancelSession(sessionId, toolName);
+      else if (['UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd'].includes(payload.hook_event_name || '')) approvals.cancelSession(sessionId);
       return { ok: true };
     }
-    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'a tool';
     const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input as Record<string, unknown> : undefined;
-    const { outcome } = approvals.hold(sessionId, toolName, toolInput, approvalHoldMs);
-    reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(sessionId); });
+    const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
+    reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
     const result = await outcome;
     if (result === 'allow' || result === 'deny') {
       await claude.applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);

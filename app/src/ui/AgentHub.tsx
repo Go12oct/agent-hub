@@ -7,7 +7,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Capacitor } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
-import { agentLabels, type AgentKind, type AgentSession, type SessionMessage, sessionOrder } from '@agent-hub/shared';
+import { agentLabels, type AgentKind, type AgentSession, type PendingApproval, type SessionMessage, sessionOrder } from '@agent-hub/shared';
 import {
   candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
   type PairingDetails,
@@ -565,7 +565,9 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
         <div ref={bottom} />
       </div>
 
-      {session.approval && <ApprovalCard session={session} pairing={pairing} />}
+      {(session.approvals || (session.approval ? [session.approval] : [])).map((approval) => (
+        <ApprovalCard key={approval.id} session={session} approval={approval} pairing={pairing} />
+      ))}
       {canReply ? (
         <footer className="composer">
           {(sendError || (!sending && session.replyError)) && (
@@ -590,8 +592,7 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
   );
 }
 
-function ApprovalCard({ session, pairing }: { session: AgentSession; pairing: PairingDetails }) {
-  const approval = session.approval!;
+function ApprovalCard({ session, approval, pairing }: { session: AgentSession; approval: PendingApproval; pairing: PairingDetails }) {
   const [busy, setBusy] = useState<'allow' | 'deny' | undefined>();
   const [error, setError] = useState('');
   useEffect(() => { setBusy(undefined); setError(''); }, [approval.id]);

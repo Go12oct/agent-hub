@@ -39,7 +39,6 @@ export class ApprovalBroker {
   onChange?: (sessionId: string) => void;
 
   hold(sessionId: string, toolName: string, input: Record<string, unknown> | undefined, holdMs: number): { approval: PendingApproval; outcome: Promise<ApprovalOutcome> } {
-    this.cancel(sessionId);
     const { summary, detail } = summarizeToolRequest(toolName, input);
     const approval: PendingApproval = { id: randomUUID(), toolName, summary, detail, requestedAt: new Date().toISOString() };
     let settle!: (outcome: ApprovalOutcome) => void;
@@ -47,35 +46,45 @@ export class ApprovalBroker {
     let timer: NodeJS.Timeout | undefined;
     const resolve = (result: ApprovalOutcome) => {
       if (timer) clearTimeout(timer);
-      if (this.held.get(sessionId)?.approval.id !== approval.id) return;
-      this.held.delete(sessionId);
+      if (!this.held.delete(approval.id)) return;
       settle(result);
       this.onChange?.(sessionId);
     };
     timer = setTimeout(() => resolve('timeout'), holdMs);
-    this.held.set(sessionId, { approval, sessionId, resolve });
+    this.held.set(approval.id, { approval, sessionId, resolve });
     this.onChange?.(sessionId);
     return { approval, outcome };
   }
 
-  pending(sessionId: string): PendingApproval | undefined {
-    return this.held.get(sessionId)?.approval;
+  pending(sessionId: string): PendingApproval[] {
+    return [...this.held.values()].filter((held) => held.sessionId === sessionId).map((held) => held.approval);
   }
 
   decide(sessionId: string, approvalId: string | undefined, decision: ApprovalDecision): 'ok' | 'none' | 'stale' {
-    const held = this.held.get(sessionId);
-    if (!held) return 'none';
-    if (approvalId && held.approval.id !== approvalId) return 'stale';
-    held.resolve(decision);
+    const mine = [...this.held.values()].filter((held) => held.sessionId === sessionId);
+    if (!mine.length) return 'none';
+    const target = approvalId ? mine.find((held) => held.approval.id === approvalId) : mine[0];
+    if (!target) return 'stale';
+    target.resolve(decision);
     return 'ok';
   }
 
-  cancel(sessionId: string): void {
-    this.held.get(sessionId)?.resolve('cancelled');
+  cancel(approvalId: string): void {
+    this.held.get(approvalId)?.resolve('cancelled');
+  }
+
+  cancelSession(sessionId: string, toolName?: string): void {
+    const mine = [...this.held.values()].filter((held) => held.sessionId === sessionId);
+    if (toolName) {
+      const match = mine.find((held) => held.approval.toolName === toolName);
+      if (match) match.resolve('cancelled');
+      return;
+    }
+    for (const held of mine) held.resolve('cancelled');
   }
 
   cancelAll(): void {
-    for (const sessionId of [...this.held.keys()]) this.cancel(sessionId);
+    for (const held of [...this.held.values()]) held.resolve('cancelled');
   }
 }
 

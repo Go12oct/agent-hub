@@ -22,6 +22,7 @@ export interface AgentSession {
   canReply: boolean;
   replyError?: string;
   approval?: PendingApproval;
+  approvals?: PendingApproval[];
   lastMessage?: string;
   lastRole?: MessageRole;
   startedAt?: string;

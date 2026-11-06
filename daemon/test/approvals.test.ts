@@ -39,30 +39,35 @@ describe('approval broker', () => {
     expect(summarizeToolRequest('mcp__db__query', { sql: 'select 1' })).toEqual({ summary: 'Use mcp__db__query', detail: '{"sql":"select 1"}' });
   });
 
-  it('resolves allow and deny, rejects stale ids, and times out', async () => {
+  it('resolves allow and deny, rejects stale ids, holds parallel requests, and times out', async () => {
     vi.useFakeTimers();
     try {
       const broker = new ApprovalBroker();
       const changes: string[] = [];
       broker.onChange = (id) => changes.push(id);
       const first = broker.hold('s1', 'Bash', { command: 'ls' }, 1000);
-      expect(broker.pending('s1')?.summary).toBe('Run: ls');
+      expect(broker.pending('s1').map((item) => item.summary)).toEqual(['Run: ls']);
       expect(broker.decide('s1', 'wrong-id', 'allow')).toBe('stale');
       expect(broker.decide('s1', first.approval.id, 'allow')).toBe('ok');
       await expect(first.outcome).resolves.toBe('allow');
-      expect(broker.pending('s1')).toBeUndefined();
+      expect(broker.pending('s1')).toEqual([]);
       expect(broker.decide('s1', undefined, 'allow')).toBe('none');
 
-      const second = broker.hold('s1', 'Bash', { command: 'ls' }, 1000);
-      const replaced = broker.hold('s1', 'Bash', { command: 'pwd' }, 1000);
-      await expect(second.outcome).resolves.toBe('cancelled');
-      expect(broker.decide('s1', undefined, 'deny')).toBe('ok');
-      await expect(replaced.outcome).resolves.toBe('deny');
+      const bash = broker.hold('s1', 'Bash', { command: 'npm test' }, 1000);
+      const write = broker.hold('s1', 'Write', { file_path: 'result.txt' }, 1000);
+      expect(broker.pending('s1')).toHaveLength(2);
+      expect(broker.decide('s1', write.approval.id, 'deny')).toBe('ok');
+      await expect(write.outcome).resolves.toBe('deny');
+      expect(broker.pending('s1').map((item) => item.toolName)).toEqual(['Bash']);
+      broker.cancelSession('s1', 'Edit');
+      expect(broker.pending('s1')).toHaveLength(1);
+      broker.cancelSession('s1', 'Bash');
+      await expect(bash.outcome).resolves.toBe('cancelled');
 
       const timed = broker.hold('s2', 'Bash', {}, 1000);
       vi.advanceTimersByTime(1001);
       await expect(timed.outcome).resolves.toBe('timeout');
-      expect(changes.filter((id) => id === 's1').length).toBeGreaterThanOrEqual(4);
+      expect(changes.filter((id) => id === 's1').length).toBeGreaterThanOrEqual(6);
     } finally { vi.useRealTimers(); }
   });
 
@@ -96,7 +101,8 @@ describe('ntfy notifications', () => {
     expect(sessionDeepLink('claude-code:a/b')).toBe('agenthub://session/claude-code%3Aa%2Fb');
     const approval = { id: 'ap1', toolName: 'Bash', summary: 'Run: rm -rf node_modules', requestedAt: new Date().toISOString() };
     expect(ntfyMessage(session({ approval }))).toMatchObject({ title: 'Claude Code wants permission — repo', priority: 'high' });
-    expect(ntfyMessage(session({ approval })).body).toContain('rm -rf node_modules');
+    expect(ntfyMessage(session({ approval })).body).not.toContain('rm -rf node_modules');
+    expect(ntfyMessage(session({ approval })).body).toContain('Bash');
     expect(ntfyMessage(session({ status: 'done' })).title).toBe('Claude Code finished — repo');
     expect(ntfyMessage(session({ status: 'error' })).title).toBe('Claude Code hit an error — repo');
   });
@@ -129,6 +135,7 @@ describe('Claude approvals over HTTP', () => {
       const list = await runtime.app.inject({ url: '/api/sessions', headers: auth });
       const shown = (list.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1');
       expect(shown?.approval).toMatchObject({ toolName: 'Bash', summary: 'Run: rm -rf node_modules', detail: 'Remove node_modules' });
+      expect(shown?.approvals).toHaveLength(1);
       expect(shown?.lastMessage).toBe('Run: rm -rf node_modules');
 
       const decided = await runtime.app.inject({
@@ -181,9 +188,18 @@ describe('Claude approvals over HTTP', () => {
 
       const held = runtime.app.inject({ method: 'POST', url: '/hooks/claude?token=test-token', payload: permissionRequest });
       await vi.waitFor(() => expect(runtime.sessions.get('claude-code:perm-1')?.status).toBe('needs_input'));
+      for (const payload of [
+        { session_id: 'perm-1', hook_event_name: 'Notification', cwd: '/tmp/project', notification_type: 'permission_prompt', message: 'Claude needs your permission' },
+        { session_id: 'perm-1', hook_event_name: 'SubagentStart', cwd: '/tmp/project' },
+        { session_id: 'perm-1', hook_event_name: 'PreToolUse', cwd: '/tmp/project', tool_name: 'Read' },
+      ]) {
+        await runtime.app.inject({ method: 'POST', url: '/hooks/claude?token=test-token', payload });
+      }
+      const still = await runtime.app.inject({ url: '/api/sessions', headers: auth });
+      expect((still.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1')?.approval?.toolName).toBe('Bash');
       await runtime.app.inject({
         method: 'POST', url: '/hooks/claude?token=test-token',
-        payload: { session_id: 'perm-1', hook_event_name: 'PreToolUse', cwd: '/tmp/project' },
+        payload: { session_id: 'perm-1', hook_event_name: 'PreToolUse', cwd: '/tmp/project', tool_name: 'Bash' },
       });
       expect((await held).json()).toEqual({});
       const list = await runtime.app.inject({ url: '/api/sessions', headers: auth });

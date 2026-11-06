@@ -11,6 +11,7 @@ $matchingRule = $rules | Where-Object {
   $addressFilter = $_ | Get-NetFirewallAddressFilter -ErrorAction SilentlyContinue
   $remoteAddresses = @($addressFilter.RemoteAddress)
   $_.Enabled -eq 'True' -and
+    "$($_.Profile)" -eq 'Any' -and
     $_.Direction -eq 'Inbound' -and
     $_.Action -eq 'Allow' -and
     $portFilter.Protocol -eq 'TCP' -and

@@ -12,7 +12,7 @@ export function ntfyMessage(session: AgentSession): { title: string; body: strin
   if (session.status === 'needs_input' && session.approval) {
     return {
       title: `${label} wants permission — ${where}`,
-      body: `${session.approval.summary}\n\nOpen Agent Hub to allow or deny.`,
+      body: `Claude wants to use ${session.approval.toolName}. Open Agent Hub to see the request and allow or deny it.`,
       priority: 'high',
       tags: 'raised_hand',
     };
