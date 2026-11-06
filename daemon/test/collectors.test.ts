@@ -375,6 +375,9 @@ describe('Devin API mapping', () => {
     expect(asksForSecret('Could you send your API key?')).toBe(true);
     expect(asksForSecret('Can you send the API key?')).toBe(true);
     expect(asksForSecret("I'll send the results after you provide your API key.")).toBe(true);
+    expect(asksForSecret('We need your API key.')).toBe(true);
+    expect(asksForSecret('Please enter your username and password.')).toBe(true);
+    expect(asksForSecret('I need token refresh support.')).toBe(false);
     expect(asksForSecret('Create a token refresh endpoint.')).toBe(false);
     expect(asksForSecret('Create a password reset endpoint.')).toBe(false);
     expect(asksForSecret('Add API key rotation support.')).toBe(false);

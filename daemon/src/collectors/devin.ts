@@ -4,15 +4,16 @@ import type { Collector, EmitSession } from './types.js';
 import { projectName } from './files.js';
 import { devinSecretRequestMarker } from '../notifications.js';
 
-const credentialWords = /\b(?:secrets?|api[\s-]+keys?|tokens?|keys?|credentials?|passwords?)\b/i;
 const promptContext = /\bprompts?\b|\bI\s+(?:need|still\s+need)\b|\bI['’]ll\s+need\b|\bwaiting\s+(?:for|on)\b/i;
 const devinOffer = /^\s*I(?:'ll| will| can| am going to)\s+(?:send|share|give)\b/i;
-const supplyVerb = '(?:provide|paste|enter|add|share|give|send|generate|create)';
+const supplyVerb = '(?:provide|paste|enter|add|share|give|send|generate|create|need)';
 const credentialObject = '(?:secrets?|api[\\s-]+keys?|tokens?|keys?|credentials?|passwords?)';
 const devTaskNoun = '(?:reset|refresh|rotation|parser|endpoint|handler|logic|validation|field|form|flow|manager|store|storage|middleware|check|hashing|expiry|bug|support|generation)';
+const credentialPattern = `\\b${credentialObject}\\b(?!\\s+${devTaskNoun}\\b)`;
+const credentialWords = new RegExp(credentialPattern, 'i');
 const userDirectedAsk = new RegExp(`^(?:please\\s+)?${supplyVerb}\\b|\\b(?:please|can you|could you|would you|you(?:'ll)? need to|you)\\s+${supplyVerb}\\b|\\byour\\b`, 'i');
-const suppliedCredential = new RegExp(`\\b${supplyVerb}\\b(?:\\s+\\S+){0,4}?\\s+\\b${credentialObject}\\b(?!\\s+${devTaskNoun}\\b)`, 'i');
-const clauseSeparators = /,|;|\b(?:after|once|when|if|before|then|and|but|so)\b/i;
+const suppliedCredential = new RegExp(`\\b${supplyVerb}\\b(?:\\s+\\S+){0,4}?\\s+${credentialPattern}`, 'i');
+const clauseSeparators = /,|;|\b(?:after|once|when|if|before|then|but|so)\b/i;
 
 export function asksForSecret(text: string): boolean {
   return text.split(/[.!?\r\n]+/).some((sentence) =>
