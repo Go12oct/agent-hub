@@ -154,7 +154,10 @@ export function AgentHub() {
     source.addEventListener('snapshot', (event) => {
       if (!alive) return;
       const snapshot = JSON.parse((event as MessageEvent).data) as AgentSession[];
-      snapshot.forEach((session) => previousStatuses.current.set(session.id, session.status));
+      snapshot.forEach((session) => {
+        previousStatuses.current.set(session.id, session.status);
+        previousApprovals.current.set(session.id, new Set((session.approvals ?? (session.approval ? [session.approval] : [])).map((item) => item.id)));
+      });
       setSessions(snapshot);
       setConnection('connected');
     });
@@ -167,13 +170,20 @@ export function AgentHub() {
       const pendingApprovals = session.approvals ?? (session.approval ? [session.approval] : []);
       const seenApprovals = previousApprovals.current.get(session.id) ?? new Set<string>();
       previousApprovals.current.set(session.id, new Set(pendingApprovals.map((item) => item.id)));
-      const freshApproval = pendingApprovals.find((item) => !seenApprovals.has(item.id));
-      const newApproval = Boolean(freshApproval);
-      if (Capacitor.isNativePlatform() && ((previous !== 'needs_input' && session.status === 'needs_input') || newApproval)) {
+      const freshApprovals = pendingApprovals.filter((item) => !seenApprovals.has(item.id));
+      const alerts: Array<{ title: string; body: string }> = freshApprovals.map((item) => ({
+        title: `${agentLabels[session.agent]} wants permission`, body: item.summary.slice(0, 160),
+      }));
+      if (!alerts.length && previous !== 'needs_input' && session.status === 'needs_input') {
+        alerts.push({ title: `${agentLabels[session.agent]} needs you`, body: session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title });
+      }
+      if (Capacitor.isNativePlatform() && alerts.length) {
         void import('@capacitor/local-notifications').then(async ({ LocalNotifications }) => {
           const permission = await LocalNotifications.checkPermissions();
           if (permission.display !== 'granted') await LocalNotifications.requestPermissions();
-          await LocalNotifications.schedule({ notifications: [{ id: Math.floor(Math.random() * 2_000_000_000), title: freshApproval ? `${agentLabels[session.agent]} wants permission` : `${agentLabels[session.agent]} needs you`, body: freshApproval ? freshApproval.summary.slice(0, 160) : session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title, extra: { sessionId: session.id } }] });
+          await LocalNotifications.schedule({
+            notifications: alerts.map((alert) => ({ id: Math.floor(Math.random() * 2_000_000_000), ...alert, extra: { sessionId: session.id } })),
+          });
         }).catch(() => {});
       }
     });
