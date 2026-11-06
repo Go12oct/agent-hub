@@ -9,6 +9,10 @@ export function sessionDeepLink(sessionId: string): string {
 export function ntfyMessage(session: AgentSession): { title: string; body: string; priority: string; tags: string } {
   const label = agentLabels[session.agent];
   const where = session.project || session.title;
+  const lastMessage = session.lastMessage;
+  if (session.agent === 'devin' && session.status === 'needs_input' && lastMessage?.startsWith('Devin is asking for a secret')) {
+    return { title: `Devin needs a secret — ${where}`, body: lastMessage, priority: 'high', tags: 'raised_hand' };
+  }
   if (session.status === 'needs_input' && session.approval) {
     return {
       title: `${label} wants permission — ${where}`,
