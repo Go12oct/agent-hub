@@ -6,7 +6,7 @@ import type { AgentSession } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
 import { ApprovalBroker, hookDecisionBody, summarizeToolRequest } from '../src/approvals';
 import { approvalHookTimeout, installClaudeHooks } from '../src/claude-hooks';
-import { NtfyNotifier, ntfyMessage, sessionDeepLink } from '../src/notifications';
+import { devinSecretRequestMarker, NtfyNotifier, ntfyMessage, sessionDeepLink } from '../src/notifications';
 import { createHub } from '../src/server';
 
 class FakeCollector implements Collector {
@@ -117,7 +117,7 @@ describe('ntfy notifications', () => {
   });
 
   it('builds a secret-request notification for Devin', () => {
-    const message = 'Devin is asking for a secret — open Devin to add it';
+    const message = `${devinSecretRequestMarker} — open Devin to add it`;
     expect(ntfyMessage(session({
       id: 'devin:secret',
       agent: 'devin',
@@ -130,6 +130,39 @@ describe('ntfy notifications', () => {
       priority: 'high',
       tags: 'raised_hand',
     });
+  });
+
+  it('notifies when an existing or stale first-seen Devin session reveals a secret request', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    const updatedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const blocked = session({
+      id: 'devin:blocked',
+      agent: 'devin',
+      nativeId: 'blocked',
+      status: 'needs_input',
+      updatedAt,
+      lastMessage: 'Waiting for your input',
+    });
+    await notifier.update(blocked);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await notifier.update({ ...blocked, lastMessage: `${devinSecretRequestMarker} — open Devin to add it` });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [, updateInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String((updateInit.headers as Record<string, string>).Title)).toContain('Devin needs a secret');
+
+    const staleNotifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    await staleNotifier.update(session({
+      id: 'devin:stale-secret',
+      agent: 'devin',
+      nativeId: 'stale-secret',
+      status: 'needs_input',
+      updatedAt,
+      lastMessage: `${devinSecretRequestMarker} — open Devin to add it`,
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [, staleInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(String((staleInit.headers as Record<string, string>).Title)).toContain('Devin needs a secret');
   });
 
   it('posts to the topic with a Click header and only on real transitions', async () => {

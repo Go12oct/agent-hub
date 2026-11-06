@@ -2,16 +2,15 @@ import os from 'node:os';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
 import type { Collector, EmitSession } from './types.js';
 import { projectName } from './files.js';
+import { devinSecretRequestMarker } from '../notifications.js';
 
-const credentialWords = String.raw`\b(?:secret|api[\s-]+keys?|tokens?|keys?|credentials?|passwords?)\b`;
-const requestWords = String.raw`\b(?:prompts?|needs?|provide|paste|enter|add|create|send\s+me|waiting\s+for|while\s+you\s+create)\b`;
-const secretRequestPattern = new RegExp(
-  `(?:${credentialWords}[^.!?\\r\\n]{0,120}${requestWords}|${requestWords}[^.!?\\r\\n]{0,120}${credentialWords})`,
-  'i',
-);
+const credentialWords = /\b(?:secrets?|api[\s-]+keys?|tokens?|keys?|credentials?|passwords?)\b/i;
+const userDirectedSupply = /\b(?:you|your)\b[\s\S]*?\b(?:provide|paste|enter|add|create|send|share|give|generate)\b|\b(?:provide|paste|enter|add|create|send|share|give|generate)\b[\s\S]*?\b(?:you|your)\b/i;
+const promptContext = /\bprompts?\b|\bI\s+(?:need|still\s+need)\b|\bI['’]ll\s+need\b|\bwaiting\s+(?:for|on)\b|\bsend\s+me\b/i;
 
 export function asksForSecret(text: string): boolean {
-  return text.split(/[.!?\r\n]+/).some((sentence) => secretRequestPattern.test(sentence));
+  return text.split(/[.!?\r\n]+/).some((sentence) =>
+    credentialWords.test(sentence) && (userDirectedSupply.test(sentence) || promptContext.test(sentence)));
 }
 
 export function parseDevinMessages(rows: unknown): SessionMessage[] {
@@ -116,7 +115,7 @@ export class DevinCollector implements Collector {
           && ['working', 'needs_input'].includes(session.status)
           && hasOpenSecretRequest(messages);
         const updated = secretRequest
-          ? { ...session, status: 'needs_input' as const, lastMessage: 'Devin is asking for a secret — open Devin to add it', lastRole: 'assistant' as const }
+          ? { ...session, status: 'needs_input' as const, lastMessage: `${devinSecretRequestMarker} — open Devin to add it`, lastRole: 'assistant' as const }
           : { ...session, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
         this.sessions.set(id, updated);
         this.emit?.(updated);
@@ -164,7 +163,7 @@ export class DevinCollector implements Collector {
           ...(project ? { project } : {}),
           status: secretRequest ? 'needs_input' : status,
           ...(secretRequest
-            ? { lastMessage: 'Devin is asking for a secret — open Devin to add it', lastRole: 'assistant' as const }
+            ? { lastMessage: `${devinSecretRequestMarker} — open Devin to add it`, lastRole: 'assistant' as const }
             : lastMessage
             ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
             : status === 'needs_input' ? { lastMessage: 'Waiting for your input' } : {}),
