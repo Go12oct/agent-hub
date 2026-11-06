@@ -81,8 +81,8 @@ describe('Claude hook timeout', () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-hooks-'));
     try {
       const file = path.join(dir, 'settings.json');
-      await installClaudeHooks(file, { ...config, approvals: undefined });
-      await installClaudeHooks(file, { ...config, approvals: { holdSeconds: 120 } });
+      await installClaudeHooks(file, Promise.resolve({ ...config, approvals: undefined }));
+      await installClaudeHooks(file, Promise.resolve({ ...config, approvals: { holdSeconds: 120 } }));
       const settings = JSON.parse(await readFile(file, 'utf8'));
       expect(settings.hooks.PermissionRequest).toHaveLength(1);
       expect(settings.hooks.PermissionRequest[0].hooks[0]).toMatchObject({ type: 'http', timeout: 180 });
