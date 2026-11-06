@@ -243,18 +243,22 @@ export function createHub(
   });
   app.post<{ Body: Record<string, unknown> }>('/hooks/claude', async (request, reply) => {
     const payload = (request.body || {}) as ClaudeHookPayload & { tool_name?: unknown; tool_input?: unknown };
-    await claude.applyHook(payload, emit);
-    if (!payload.session_id) return { ok: true };
+    if (!payload.session_id) {
+      await claude.applyHook(payload, emit);
+      return { ok: true };
+    }
     const sessionId = `claude-code:${payload.session_id}`;
     const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
     const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input as Record<string, unknown> : undefined;
     if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
+      await claude.applyHook(payload, emit);
       if (payload.hook_event_name === 'PreToolUse' && toolName) approvals.cancelSession(sessionId, { name: toolName, input: toolInput });
       else if (['UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd'].includes(payload.hook_event_name || '')) approvals.cancelSession(sessionId);
       return { ok: true };
     }
     const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
     reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
+    await claude.applyHook(payload, emit);
     const result = await outcome;
     if (result === 'allow' || result === 'deny') {
       await claude.applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);

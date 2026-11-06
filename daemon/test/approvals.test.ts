@@ -137,9 +137,59 @@ describe('ntfy notifications', () => {
     await notifier.update(session({ approval, approvals: [approval, write] }));
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
+
+  it('suppresses old first-seen sessions unless they have a pending approval', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const oldUpdatedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const oldNotifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    await oldNotifier.update(session({ status: 'done', updatedAt: oldUpdatedAt }));
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    const freshNotifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    await freshNotifier.update(session({ status: 'done', updatedAt: new Date().toISOString() }));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    const approval = { id: 'ap-old', toolName: 'Bash', summary: 'Run: ls', requestedAt: oldUpdatedAt };
+    const approvalNotifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    await approvalNotifier.update(session({
+      status: 'needs_input',
+      updatedAt: oldUpdatedAt,
+      approval,
+      approvals: [approval],
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [, init] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(String((init.headers as Record<string, string>).Title)).toContain('wants permission');
+  });
 });
 
 describe('Claude approvals over HTTP', () => {
+  it('sends one permission notification for a new PermissionRequest session', async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const runtime = createHub({ ...config, ntfy: { topic: 't' } }, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
+    try {
+      const hook = runtime.app.inject({ method: 'POST', url: '/hooks/claude?token=test-token', payload: permissionRequest });
+      await vi.waitFor(() => expect(runtime.sessions.get('claude-code:perm-1')?.status).toBe('needs_input'));
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(String((init.headers as Record<string, string>).Title)).toContain('wants permission');
+
+      const list = await runtime.app.inject({ url: '/api/sessions', headers: auth });
+      const shown = (list.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1');
+      const decided = await runtime.app.inject({
+        method: 'POST', url: '/api/sessions/claude-code:perm-1/approval', headers: auth,
+        payload: { decision: 'allow', approvalId: shown?.approval?.id },
+      });
+      expect(decided.statusCode).toBe(204);
+      expect((await hook).statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('holds the PermissionRequest hook until the phone allows it', async () => {
     const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
     try {

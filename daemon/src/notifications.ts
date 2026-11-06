@@ -37,9 +37,17 @@ export class NtfyNotifier {
     this.previous.set(session.id, { status: session.status, approvalIds: new Set(approvals.map((item) => item.id)) });
     if (!this.config?.topic) return;
     const newApproval = approvals.find((item) => !previous?.approvalIds.has(item.id));
-    const changed = previous?.status !== session.status || Boolean(newApproval);
-    if (!changed || !['needs_input', 'done', 'error'].includes(session.status)) return;
     const now = Date.now();
+    const updatedAt = Date.parse(session.updatedAt);
+    const firstSeen = previous === undefined;
+    const freshTerminalState = ['needs_input', 'done', 'error'].includes(session.status)
+      && Number.isFinite(updatedAt)
+      && updatedAt <= now
+      && now - updatedAt <= 120_000;
+    const changed = firstSeen
+      ? approvals.length > 0 || freshTerminalState
+      : previous.status !== session.status || Boolean(newApproval);
+    if (!changed || !['needs_input', 'done', 'error'].includes(session.status)) return;
     if (!newApproval && now - (this.sentAt.get(session.id) || 0) < 30_000) return;
     this.sentAt.set(session.id, now);
     const message = ntfyMessage(newApproval ? { ...session, approval: newApproval } : { ...session, approval: undefined });
