@@ -81,11 +81,11 @@ async function run(): Promise<void> {
       overrideUrl = parsed.origin;
     }
     const chosenUrl = overrideUrl || candidates[0] || `http://127.0.0.1:${config.port}`;
-    const displayedUrls = candidates.includes(chosenUrl) ? candidates : [...candidates, chosenUrl];
-    console.log('Agent Hub pairing URLs (chosen URL marked):');
-    displayedUrls.forEach((url) => console.log(`  ${url}${url === chosenUrl ? ' (chosen)' : ''}`));
-    console.log("If the phone can't connect, try another URL with: agent-hub pair --url http://<ip>:4747");
-    const pairing = `agenthub://pair?url=${encodeURIComponent(chosenUrl)}&token=${encodeURIComponent(config.token)}`;
+    const displayedUrls = [chosenUrl, ...candidates.filter((url) => url !== chosenUrl)];
+    console.log('Agent Hub pairing URLs (the phone tries them in this order):');
+    displayedUrls.forEach((url) => console.log(`  ${url}${url === chosenUrl ? ' (first)' : ''}`));
+    console.log("If the phone can't connect, put another URL first with: agent-hub pair --url http://<ip>:4747");
+    const pairing = `agenthub://pair?${displayedUrls.map((url) => `url=${encodeURIComponent(url)}`).join('&')}&token=${encodeURIComponent(config.token)}`;
     qrcode.generate(pairing, { small: true });
   } else if (command === 'firewall') {
     if (process.platform !== 'win32') {

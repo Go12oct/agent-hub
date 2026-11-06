@@ -33,12 +33,13 @@ describe('LAN pairing URLs', () => {
     ]);
   });
 
-  it('ranks Tailscale addresses ahead of physical LAN adapters', () => {
+  it('ranks Wi-Fi first, then Tailscale, then other adapters', () => {
     const interfaces: ReturnType<typeof os.networkInterfaces> = {
-      'Wi-Fi 3': [ipv4('192.168.8.3')],
       Tailscale: [ipv4('100.80.0.7')],
+      'Local Area Connection* 14': [ipv4('192.168.137.1')],
+      'Wi-Fi 3': [ipv4('192.168.8.3')],
     };
 
-    expect(lanUrls(4747, interfaces)[0]).toBe('http://100.80.0.7:4747');
+    expect(lanUrls(4747, interfaces)).toEqual(['http://192.168.8.3:4747', 'http://100.80.0.7:4747', 'http://192.168.137.1:4747']);
   });
 });

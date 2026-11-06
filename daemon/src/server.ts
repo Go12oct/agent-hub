@@ -47,7 +47,7 @@ export function lanUrls(port: number, networkInterfaces = os.networkInterfaces()
       const virtualAdapter = /vethernet|virtual|vmware|vbox|virtualbox|hyper-v|wsl|docker|bluetooth|loopback|local area connection\*/i.test(name);
       const hotspotAddress = address.address.startsWith('192.168.137.');
       const preferredAdapter = /wi-?fi|wlan|wireless|^en|^eth|ethernet/i.test(name);
-      const priority = tailscale ? 0 : virtualAdapter || hotspotAddress ? 3 : preferredAdapter ? 1 : 2;
+      const priority = virtualAdapter || hotspotAddress ? 3 : preferredAdapter ? 0 : tailscale ? 1 : 2;
       const previous = priorities.get(address.address);
       if (!previous || priority < previous.priority) priorities.set(address.address, { priority, order });
       order += 1;
