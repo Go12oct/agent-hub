@@ -4,18 +4,13 @@ import type { Collector, EmitSession } from './types.js';
 import { projectName } from './files.js';
 import { devinSecretRequestMarker } from '../notifications.js';
 
-const credentialWords = /\b(?:secrets?|api[\s-]+keys?|tokens?(?!\s+refresh\b)|keys?|credentials?|passwords?)\b/i;
-const askForm = /^\s*(?:please\s+)?(?:provide|paste|enter|add|share|give|generate|create)\b|\b(?:please|can you|could you|would you|you(?:'ll)? need to)\s+(?:provide|paste|enter|add|share|give|generate|create)\b/i;
-const sendMe = /\b(?:send|share|give)\s+me\b/i;
-const yourSupply = /\byour\b[\s\S]*?\b(?:provide|paste|enter|add|share|give|create|generate|need)\b|\b(?:provide|paste|enter|add|share|give|create|generate|need)\b[\s\S]*?\byour\b/i;
-const promptContext = /\bprompts?\b|\bI\s+(?:need|still\s+need)\b|\bI['’]ll\s+need\b|\bwaiting\s+(?:for|on)\b/i;
-const devinOffer = /^\s*I(?:'ll| will| can| am going to)\s+(?:send|share|give)\b/i;
+const credentialWords = /\b(?:secrets?|api[\s-]+keys?|tokens?|keys?|credentials?|passwords?)\b/i;
+const userDirectedSupply = /\b(?:you|your)\b[\s\S]*?\b(?:provide|paste|enter|add|create|send|share|give|generate)\b|\b(?:provide|paste|enter|add|create|send|share|give|generate)\b[\s\S]*?\b(?:you|your)\b/i;
+const promptContext = /\bprompts?\b|\bI\s+(?:need|still\s+need)\b|\bI['’]ll\s+need\b|\bwaiting\s+(?:for|on)\b|\bsend\s+me\b/i;
 
 export function asksForSecret(text: string): boolean {
   return text.split(/[.!?\r\n]+/).some((sentence) =>
-    !devinOffer.test(sentence)
-      && credentialWords.test(sentence)
-      && (askForm.test(sentence) || sendMe.test(sentence) || yourSupply.test(sentence) || promptContext.test(sentence)));
+    credentialWords.test(sentence) && (userDirectedSupply.test(sentence) || promptContext.test(sentence)));
 }
 
 export function parseDevinMessages(rows: unknown): SessionMessage[] {

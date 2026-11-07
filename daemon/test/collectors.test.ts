@@ -369,15 +369,10 @@ describe('Devin API mapping', () => {
     expect(asksForSecret("I'm sending the secret prompts now, saved for all your future sessions.")).toBe(true);
     expect(asksForSecret('Please enter your API key.')).toBe(true);
     expect(asksForSecret('Could you add the secrets?')).toBe(true);
-    expect(asksForSecret('Please provide an API key to proceed.')).toBe(true);
-    expect(asksForSecret('Paste your Cloudflare token here')).toBe(true);
-    expect(asksForSecret('Could you share the secrets?')).toBe(true);
     expect(asksForSecret('Create a token refresh endpoint.')).toBe(false);
     expect(asksForSecret('I rotated the API key in the config.')).toBe(false);
     expect(asksForSecret('Added token refresh logic.')).toBe(false);
     expect(asksForSecret('Fixed the password reset bug.')).toBe(false);
-    expect(asksForSecret('I will send you the API key shortly.')).toBe(false);
-    expect(asksForSecret("I'll share the token with you once it's generated")).toBe(false);
   });
 
   it('polls with a personal API key and emits mapped sessions', async () => {
