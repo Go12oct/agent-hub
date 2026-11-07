@@ -25,15 +25,16 @@ export function codexHookCommand(bridge: string, standalone = isSea()): string {
     : `${quote(process.execPath)} ${quote(bridge)} codex`;
 }
 
-function isAgentHubHook(hook: any, bridge: string): boolean {
+function isAgentHubHook(hook: any): boolean {
   return hook?.type === 'command' && typeof hook.command === 'string'
-    && [codexHookCommand(bridge, false), codexHookCommand(bridge, true)].includes(hook.command);
+    && /(?:hook-bridge\.cjs"?|\shook-bridge)\s+codex\s*$/i.test(hook.command);
 }
 
 export async function installCodexHooks(
   file = hooksPath(),
   configPromise?: Promise<HubConfig>,
   bridge = bridgePath(),
+  standalone = isSea(),
 ): Promise<boolean> {
   let directory;
   try { directory = await stat(path.dirname(file)); } catch { return false; }
@@ -52,29 +53,37 @@ export async function installCodexHooks(
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
     : {};
-  const command = codexHookCommand(bridge);
+  const command = codexHookCommand(bridge, standalone);
   for (const event of events) {
     const entries = Array.isArray(hooks[event]) ? hooks[event] : [];
     const hook: Record<string, unknown> = event === 'PermissionRequest'
       ? { type: 'command', command, timeout: approvalHookTimeout(config) }
       : { type: 'command', command };
-    const exists = entries.some((entry: any) => (entry.hooks || []).some((existing: any) => isAgentHubHook(existing, bridge)));
-    if (!exists) entries.push({ hooks: [hook] });
-    else {
-      for (const entry of entries) {
-        entry.hooks = (entry.hooks || []).map((existing: any) => (
-          isAgentHubHook(existing, bridge) ? hook : existing
-        ));
+    let installed = false;
+    for (const entry of entries) {
+      const nextHooks: any[] = [];
+      for (const existing of entry.hooks || []) {
+        if (isAgentHubHook(existing)) {
+          if (!installed) {
+            nextHooks.push(hook);
+            installed = true;
+          }
+        } else {
+          nextHooks.push(existing);
+        }
       }
+      entry.hooks = nextHooks;
     }
-    hooks[event] = entries;
+    const updatedEntries = entries.filter((entry: any) => !Array.isArray(entry.hooks) || entry.hooks.length > 0);
+    if (!installed) updatedEntries.push({ hooks: [hook] });
+    hooks[event] = updatedEntries;
   }
   settings.hooks = hooks;
   await writeFile(file, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   return true;
 }
 
-export async function uninstallCodexHooks(file = hooksPath(), bridge = bridgePath()): Promise<void> {
+export async function uninstallCodexHooks(file = hooksPath()): Promise<void> {
   let settings: Record<string, any>;
   try { settings = JSON.parse(await readFile(file, 'utf8')) as Record<string, any>; } catch { return; }
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
@@ -84,7 +93,7 @@ export async function uninstallCodexHooks(file = hooksPath(), bridge = bridgePat
     if (!Array.isArray(entries)) continue;
     hooks[event] = entries.map((entry: any) => ({
       ...entry,
-      hooks: (entry.hooks || []).filter((hook: any) => !isAgentHubHook(hook, bridge)),
+      hooks: (entry.hooks || []).filter((hook: any) => !isAgentHubHook(hook)),
     })).filter((entry: any) => entry.hooks?.length);
   }
   settings.hooks = hooks;

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codexHookCommand, installCodexHooks, uninstallCodexHooks } from '../src/codex-hooks';
+import { codexHookCommand, codexHookEvents, installCodexHooks, uninstallCodexHooks } from '../src/codex-hooks';
 
 const config = {
   token: 'test-token',
@@ -47,7 +47,7 @@ describe('Codex hook installation', () => {
       expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(expectedCommand);
       expect(JSON.parse(await readFile(`${file}.agent-hub.bak`, 'utf8'))).toEqual(original);
 
-      await uninstallCodexHooks(file, bridge);
+      await uninstallCodexHooks(file);
       const removed = JSON.parse(await readFile(file, 'utf8'));
       expect(removed.hooks.UserPromptSubmit).toEqual(original.hooks.UserPromptSubmit);
       expect(removed.hooks.Stop).toEqual(original.hooks.Stop);
@@ -89,6 +89,53 @@ describe('Codex hook installation', () => {
         command: codexHookCommand(bridge, false),
         timeout: 105,
       }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates old command paths to standalone hooks and removes either command form', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-codex-hooks-migrate-'));
+    const file = path.join(dir, 'hooks.json');
+    const bridge = path.join(dir, 'Agent Hub', 'hook-bridge.cjs');
+    const oldBridgeCommand = '"C:\\old Node\\node.exe" "C:\\Agent Hub\\hook-bridge.cjs" codex';
+    const oldStandaloneCommand = '"C:\\Agent Hub\\agent-hub.exe" hook-bridge codex';
+    await writeFile(file, JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: 'command', command: oldBridgeCommand }] },
+          { hooks: [{ type: 'command', command: 'coucou hook' }] },
+        ],
+        Stop: [{ hooks: [{ type: 'command', command: oldStandaloneCommand }] }],
+      },
+    }));
+    try {
+      expect(await installCodexHooks(file, Promise.resolve(config), bridge, true)).toBe(true);
+      const settings = JSON.parse(await readFile(file, 'utf8'));
+      const isAgentHubCommand = (command: string) => /(?:hook-bridge\.cjs"?|\shook-bridge)\s+codex\s*$/i.test(command);
+      for (const event of codexHookEvents) {
+        const commands = settings.hooks[event].flatMap((entry: any) => entry.hooks || [])
+          .filter((hook: any) => hook.type === 'command' && isAgentHubCommand(hook.command));
+        expect(commands).toHaveLength(1);
+        expect(commands[0].command).toBe(codexHookCommand(bridge, true));
+      }
+      expect(settings.hooks.UserPromptSubmit[0].hooks).toEqual([{
+        type: 'command',
+        command: codexHookCommand(bridge, true),
+      }]);
+      expect(settings.hooks.UserPromptSubmit[1].hooks).toEqual([{ type: 'command', command: 'coucou hook' }]);
+
+      settings.hooks.PreToolUse[0].hooks.push({ type: 'command', command: oldBridgeCommand });
+      settings.hooks.SessionEnd[0].hooks.push({ type: 'command', command: oldStandaloneCommand });
+      await writeFile(file, JSON.stringify(settings));
+      await uninstallCodexHooks(file);
+      const removed = JSON.parse(await readFile(file, 'utf8'));
+      for (const event of codexHookEvents) {
+        const commands = removed.hooks[event].flatMap((entry: any) => entry.hooks || [])
+          .filter((hook: any) => hook.type === 'command' && isAgentHubCommand(hook.command));
+        expect(commands).toHaveLength(0);
+      }
+      expect(removed.hooks.UserPromptSubmit[0].hooks).toEqual([{ type: 'command', command: 'coucou hook' }]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
