@@ -207,7 +207,7 @@ export function AgentHub() {
     let remove: (() => void) | undefined;
     void import('@capacitor/app').then(async ({ App }) => {
       const openLink = (link?: string | null) => {
-        if (link && parsePairingLink(link)) { setPairLink(link); setPairing(undefined); setSelectedId(undefined); return; }
+        if (link && parsePairingLink(link)) { setPairLink(link); return; }
         const id = sessionIdFromLink(link);
         if (id) { setSettingsOpen(false); setSearchOpen(false); setSelectedId(id); }
       };
@@ -262,7 +262,15 @@ export function AgentHub() {
   }
 
   if (!ready) return <div className="splash"><span className="logo">A</span></div>;
-  if (!pairing) return <Setup link={pairLink} onPaired={(next) => { setPairLink(undefined); setPairing(next); }} />;
+  if (!pairing || pairLink) {
+    return (
+      <Setup
+        link={pairLink}
+        onPaired={(next) => { setPairLink(undefined); setPairing(next); }}
+        onCancel={pairing ? () => setPairLink(undefined) : undefined}
+      />
+    );
+  }
 
   if (selectedSession) {
     return <ChatView key={selectedSession.id} session={selectedSession} pairing={pairing} onBack={() => setSelectedId(undefined)} />;
@@ -357,7 +365,7 @@ export function AgentHub() {
   );
 }
 
-function Setup({ link, onPaired }: { link?: string; onPaired: (pairing: PairingDetails) => void }) {
+function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing: PairingDetails) => void; onCancel?: () => void }) {
   const [manual, setManual] = useState(false);
   const [pairInput, setPairInput] = useState('');
   const [urlInput, setUrlInput] = useState('');
@@ -411,6 +419,7 @@ function Setup({ link, onPaired }: { link?: string; onPaired: (pairing: PairingD
         )}
         <p className="hint">On your PC, open <b>Agent Hub - Pair Phone</b> on the Desktop to show the QR code.</p>
         {error && <div className="error">{error}</div>}
+        {onCancel && <button type="button" className="secondary" onClick={onCancel}>Keep current PC</button>}
         <button className="link-btn" onClick={() => setManual((value) => !value)}>
           Enter details manually <ChevronDown size={16} className={manual ? 'flip' : ''} />
         </button>
