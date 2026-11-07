@@ -9,6 +9,7 @@ import { Capacitor } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 import { agentLabels, type AgentKind, type AgentSession, type PendingApproval, type SessionMessage, sessionOrder } from '@agent-hub/shared';
 import { localNotificationId } from '../local-notifications';
+import { activityBuckets, approvalQueue, formatElapsed, type QueueItem } from '../home';
 import {
   candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
   type PairingDetails,
@@ -76,6 +77,27 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
+async function sendDecision(
+  pairing: PairingDetails,
+  sessionId: string,
+  approvalId: string,
+  decision: 'allow' | 'deny',
+  answers?: Record<string, string>,
+): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(sessionId)}/approval`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, approvalId, ...(answers ? { answers } : {}) }),
+    });
+    if (response.ok) return undefined;
+    const body = await response.json().catch(() => ({})) as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : 'Could not send your answer. Try again.';
+  } catch {
+    return 'Could not reach your PC. Try again.';
+  }
+}
+
 export function AgentHub() {
   const [pairing, setPairing] = useState<PairingDetails>();
   const [pairLink, setPairLink] = useState<string>();
@@ -83,11 +105,13 @@ export function AgentHub() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [selectedAgent, setSelectedAgent] = useState<AgentKind | 'all'>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'needs_input' | 'working'>('all');
   const [selectedId, setSelectedId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [hiddenApprovalIds, setHiddenApprovalIds] = useState<Set<string>>(new Set());
+  const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
+  const [finishedOpen, setFinishedOpen] = useState(false);
   const pairingRef = useRef<PairingDetails | undefined>(undefined);
   const failingOver = useRef(false);
   const previousStatuses = useRef(new Map<string, AgentSession['status']>());
@@ -286,10 +310,32 @@ export function AgentHub() {
 
   const filtered = useMemo(() => sessions.filter((session) =>
     (selectedAgent === 'all' || session.agent === selectedAgent) &&
-    (statusFilter === 'all' || session.status === statusFilter) &&
     (!search || `${session.title} ${session.project || ''} ${session.lastMessage || ''}`.toLowerCase().includes(search.toLowerCase())),
-  ).sort(sessionOrder), [sessions, selectedAgent, statusFilter, search]);
+  ).sort(sessionOrder), [sessions, selectedAgent, search]);
   const groups = feedGroups(filtered);
+  const queue = useMemo(() => approvalQueue(filtered, hiddenApprovalIds), [filtered, hiddenApprovalIds]);
+  const activeTiles = useMemo(() => filtered
+    .filter((session) => session.status === 'needs_input' || session.status === 'working')
+    .sort((a, b) => (a.status === b.status ? Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : a.status === 'needs_input' ? -1 : 1)), [filtered]);
+  const workingCount = filtered.filter((session) => session.status === 'working').length;
+  const activity = useActivity(activeTiles, pairing);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!activeTiles.some((session) => session.status === 'working' && session.startedAt)) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activeTiles]);
+  useEffect(() => {
+    const currentApprovalIds = new Set(sessions.flatMap((session) =>
+      (session.approvals ?? (session.approval ? [session.approval] : [])).map((approval) => approval.id),
+    ));
+    setHiddenApprovalIds((current) => {
+      const next = new Set([...current].filter((id) => currentApprovalIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    setDecisionErrors((current) => Object.fromEntries(Object.entries(current).filter(([id]) => currentApprovalIds.has(id))));
+  }, [sessions]);
   const selectedSession = sessions.find((session) => session.id === selectedId);
   const counts = useMemo(() => {
     const map = new Map<AgentKind, number>();
@@ -322,12 +368,25 @@ export function AgentHub() {
     return <ChatView key={selectedSession.id} session={selectedSession} pairing={pairing} onBack={() => setSelectedId(undefined)} />;
   }
 
-  const scoped = selectedAgent === 'all' ? sessions : sessions.filter((session) => session.agent === selectedAgent);
-  const needsCount = scoped.filter((session) => session.status === 'needs_input').length;
-  const workingCount = scoped.filter((session) => session.status === 'working').length;
-
-  const todayCount = scoped.filter((session) => Date.parse(session.updatedAt) >= new Date().setHours(0, 0, 0, 0)).length;
-  const toggleStatus = (value: 'needs_input' | 'working') => setStatusFilter((current) => current === value ? 'all' : value);
+  async function decide(item: QueueItem, decision: 'allow' | 'deny') {
+    if (item.kind !== 'approval' || !pairing) return;
+    const { session, approval } = item;
+    setHiddenApprovalIds((current) => new Set(current).add(approval.id));
+    setDecisionErrors((current) => {
+      const next = { ...current };
+      delete next[approval.id];
+      return next;
+    });
+    const error = await sendDecision(pairing, session.id, approval.id, decision);
+    if (error) {
+      setHiddenApprovalIds((current) => {
+        const next = new Set(current);
+        next.delete(approval.id);
+        return next;
+      });
+      setDecisionErrors((current) => ({ ...current, [approval.id]: error }));
+    }
+  }
 
   return (
     <main className="screen">
@@ -347,25 +406,16 @@ export function AgentHub() {
                   {connection === 'connected' ? 'Live from your PC' : connection === 'offline' ? 'PC offline' : 'Connecting'}
                 </button>
               </span>
-              <h1>Agents</h1>
+              <h1>{queue.length ? <><em>{queue.length}</em> need{queue.length === 1 ? 's' : ''} you</> : 'All clear'}</h1>
+              <p className="app-sub">{queue.length
+                ? 'Swipe right to allow, left to deny'
+                : workingCount ? `${workingCount} agent${workingCount === 1 ? '' : 's'} working` : 'Nothing running'}</p>
             </div>
-            <button className="icon-btn glass" aria-label="Search" onClick={() => { setStatusFilter('all'); setSearchOpen(true); }}><Search size={19} /></button>
+            <button className="icon-btn glass" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={19} /></button>
             <button className="icon-btn glass" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button>
           </>
         )}
       </header>
-
-      {!search && (
-        <section className="overview" aria-label="Overview">
-          <button className={`stat needs_input${needsCount ? ' has' : ''}${statusFilter === 'needs_input' ? ' active' : ''}`} aria-pressed={statusFilter === 'needs_input'} onClick={() => toggleStatus('needs_input')}>
-            <span>Needs you</span><strong>{needsCount}</strong>
-          </button>
-          <button className={`stat working${statusFilter === 'working' ? ' active' : ''}`} aria-pressed={statusFilter === 'working'} onClick={() => toggleStatus('working')}>
-            <span>Working</span><strong>{workingCount}</strong>
-          </button>
-          <div className="stat today"><span>Today</span><strong>{todayCount}</strong></div>
-        </section>
-      )}
 
       <nav className="tabs" aria-label="Filter by app">
         <button className={selectedAgent === 'all' ? 'tab active' : 'tab'} onClick={() => setSelectedAgent('all')}>All <span>{sessions.length}</span></button>
@@ -377,15 +427,31 @@ export function AgentHub() {
       </nav>
 
       <div className="list">
-        {filtered.length === 0 ? (
-          statusFilter !== 'all' && connection !== 'offline'
-            ? <div className="empty"><h2>{statusFilter === 'needs_input' ? 'Nothing needs you' : 'No agent is working'}</h2><p>{statusFilter === 'needs_input' ? 'Approvals and questions from your agents show up here.' : 'Running sessions show up here live.'}</p></div>
-            : <Empty connection={connection} agent={selectedAgent} />
-        ) : (
+        {filtered.length === 0 ? <Empty connection={connection} agent={selectedAgent} /> : (
           <>
-            {groups.needsYou.length > 0 && <Group title="Needs you" tone="needs_input" sessions={groups.needsYou} onOpen={openSession} />}
-            {groups.working.length > 0 && <Group title="Working" tone="working" sessions={groups.working} onOpen={openSession} />}
-            {dayGroups(groups.recent).map(([title, items]) => <Group key={title} title={title} sessions={items} onOpen={openSession} />)}
+            <ApprovalDeck items={queue} errors={decisionErrors} onOpen={openSession} onDecide={(item, value) => void decide(item, value)} />
+            <div className="section-head"><span>Agents</span><span>{workingCount} working</span></div>
+            <div className="agent-tiles">
+              {activeTiles.map((session) => (
+                <AgentTile
+                  key={session.id}
+                  session={session}
+                  messages={activity.get(session.id) ?? []}
+                  now={now}
+                  onOpen={() => openSession(session.id)}
+                />
+              ))}
+            </div>
+            {groups.recent.length > 0 && (
+              <>
+                <button className="finished-toggle" onClick={() => setFinishedOpen((value) => !value)}>
+                  <span>{groups.recent.length} finished or idle</span><span>{search || finishedOpen ? 'Hide' : 'Show'}</span>
+                </button>
+                {(search || finishedOpen) && dayGroups(groups.recent).map(([title, items]) => (
+                  <Group key={title} title={title} sessions={items} onOpen={openSession} />
+                ))}
+              </>
+            )}
           </>
         )}
       </div>
@@ -409,6 +475,262 @@ export function AgentHub() {
       )}
     </main>
   );
+}
+
+function queueItemKey(item: QueueItem): string {
+  return item.kind === 'approval' ? `approval:${item.approval.id}` : `input:${item.session.id}`;
+}
+
+function ApprovalDeck({
+  items,
+  errors,
+  onOpen,
+  onDecide,
+}: {
+  items: QueueItem[];
+  errors: Record<string, string>;
+  onOpen: (id: string) => void;
+  onDecide: (item: QueueItem, decision: 'allow' | 'deny') => void;
+}) {
+  const [leaving, setLeaving] = useState<{ item: QueueItem; decision: 'allow' | 'deny' }>();
+  const exitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => { if (exitTimer.current) clearTimeout(exitTimer.current); }, []);
+  const visible = leaving
+    ? [leaving.item, ...items.filter((item) => queueItemKey(item) !== queueItemKey(leaving.item))]
+    : items;
+
+  function decide(item: QueueItem, decision: 'allow' | 'deny') {
+    if (leaving || item.kind !== 'approval') return;
+    setLeaving({ item, decision });
+    onDecide(item, decision);
+    exitTimer.current = setTimeout(() => setLeaving(undefined), 350);
+  }
+
+  if (!visible.length) {
+    return <div className="deck-empty"><strong>Nothing needs you</strong><span>You'll get a ping when an agent asks.</span></div>;
+  }
+
+  return (
+    <div className="approval-deck">
+      {visible.map((item, depth) => {
+        const isLeaving = Boolean(leaving && queueItemKey(leaving.item) === queueItemKey(item));
+        return (
+          <DeckCard
+            key={queueItemKey(item)}
+            item={item}
+            depth={depth}
+            leaving={isLeaving ? leaving?.decision : undefined}
+            error={item.kind === 'approval' ? errors[item.approval.id] : undefined}
+            onOpen={() => onOpen(item.session.id)}
+            onDecide={(decision) => decide(item, decision)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function DeckCard({
+  item,
+  depth,
+  leaving,
+  error,
+  onOpen,
+  onDecide,
+}: {
+  item: QueueItem;
+  depth: number;
+  leaving?: 'allow' | 'deny';
+  error?: string;
+  onOpen: () => void;
+  onDecide: (decision: 'allow' | 'deny') => void;
+}) {
+  const drag = useRef<{ startX: number; dx: number } | undefined>(undefined);
+  const [dragging, setDragging] = useState(false);
+  const [dragX, setDragX] = useState(0);
+  const approval = item.kind === 'approval' ? item.approval : undefined;
+  const questions = approval?.questions ?? [];
+  const swipeable = Boolean(approval && questions.length === 0 && depth === 0 && !leaving);
+  const preview = item.kind === 'input' && item.session.lastMessage ? previewText(item.session.lastMessage) : '';
+
+  function endDrag(commit: boolean) {
+    if (!drag.current) return;
+    const { dx } = drag.current;
+    drag.current = undefined;
+    setDragging(false);
+    if (commit && Math.abs(dx) > 100) {
+      onDecide(dx > 0 ? 'allow' : 'deny');
+      return;
+    }
+    setDragX(0);
+  }
+
+  return (
+    <section
+      className={`deck-card${dragging ? ' dragging' : ''}${leaving ? ` leaving ${leaving}` : ''}`}
+      data-depth={Math.min(depth, 3)}
+      style={{
+        zIndex: 10 - depth,
+        ...(dragging ? { transform: `translateX(${dragX}px) rotate(${dragX / 24}deg)` } : {}),
+      }}
+      onPointerDown={(event) => {
+        if (!swipeable || event.target instanceof Element && event.target.closest('button')) return;
+        drag.current = { startX: event.clientX, dx: 0 };
+        setDragging(true);
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        if (!drag.current) return;
+        drag.current.dx = event.clientX - drag.current.startX;
+        setDragX(drag.current.dx);
+      }}
+      onPointerUp={() => endDrag(true)}
+      onPointerCancel={() => endDrag(false)}
+    >
+      <span className="deck-stamp allow-stamp" style={{ opacity: Math.min(1, Math.max(0, dragX / 100)) }}>ALLOW</span>
+      <span className="deck-stamp deny-stamp" style={{ opacity: Math.min(1, Math.max(0, -dragX / 100)) }}>DENY</span>
+      <div className="deck-who">
+        <Avatar agent={item.session.agent} />
+        <span><strong>{agentLabels[item.session.agent]}</strong><span>{item.session.project}</span></span>
+        <time>{relativeTime(approval?.requestedAt ?? item.session.updatedAt)}</time>
+      </div>
+      <h2 className="deck-title">{item.session.title}</h2>
+      {approval ? (
+        questions.length > 0
+          ? <p className="deck-question">{questions[0]?.question}</p>
+          : (
+            <div className="deck-tool">
+              <div className="deck-summary">{approval.summary}</div>
+              {approval.detail && <div className="deck-detail">{approval.detail}</div>}
+            </div>
+          )
+      ) : <p className="deck-input">{preview}</p>}
+      {error && <div className="alert small">{error}</div>}
+      {approval && questions.length === 0 ? (
+        <>
+          <div className="deck-actions">
+            <button className="deck-deny" onClick={() => onDecide('deny')}>Deny</button>
+            <button className="deck-allow" onClick={() => onDecide('allow')}>Allow</button>
+          </div>
+          <button className="deck-open" onClick={onOpen}>Open chat</button>
+        </>
+      ) : (
+        <button className="deck-primary" onClick={onOpen}>{approval ? 'Answer' : 'Reply'}</button>
+      )}
+    </section>
+  );
+}
+
+function AgentTile({
+  session,
+  messages,
+  now,
+  onOpen,
+}: {
+  session: AgentSession;
+  messages: SessionMessage[];
+  now: number;
+  onOpen: () => void;
+}) {
+  const needsInput = session.status === 'needs_input';
+  const approval = (session.approvals ?? (session.approval ? [session.approval] : []))[0];
+  const current = needsInput ? approval?.summary : session.lastMessage ? previewText(session.lastMessage) : '';
+  const hasTimestamps = messages.some((message) => Boolean(message.at) && Number.isFinite(Date.parse(message.at!)));
+  const buckets = activityBuckets(messages, now);
+  const maxBucket = Math.max(1, ...buckets);
+  const elapsedAt = session.startedAt ? Date.parse(session.startedAt) : undefined;
+  const steps = messages.length >= 100 ? '100+' : messages.filter((message) => message.role === 'tool').length;
+
+  return (
+    <button className={`agent-tile${needsInput ? ' needs-input' : ''}`} onClick={onOpen}>
+      <span className="tile-top">
+        <Avatar agent={session.agent} />
+        <span className="tile-agent"><strong>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
+        <span className={`tile-status ${needsInput ? 'waiting' : 'working'}`}>
+          <i />{needsInput ? 'Waiting' : 'Working'}
+        </span>
+      </span>
+      <span className="tile-title">{session.title}</span>
+      {current && <span className="tile-current">{current}</span>}
+      {hasTimestamps && (
+        <span className="activity-track" aria-label="Recent activity">
+          {buckets.map((count, index) => (
+            <i
+              key={index}
+              className={needsInput && index === buckets.length - 1 ? 'ask' : count ? 'active' : ''}
+              style={{ height: `${needsInput && index === buckets.length - 1 ? 100 : count ? 30 + (count / maxBucket) * 70 : 12}%` }}
+            />
+          ))}
+        </span>
+      )}
+      <span className="tile-meta">
+        {session.startedAt && <span>{formatElapsed(now - (Number.isFinite(elapsedAt) ? elapsedAt! : now))}</span>}
+        <span>{steps} steps</span><span>now</span>
+      </span>
+    </button>
+  );
+}
+
+function useActivity(sessions: AgentSession[], pairing?: PairingDetails): Map<string, SessionMessage[]> {
+  const [activity, setActivity] = useState<Map<string, SessionMessage[]>>(new Map());
+  const sessionsRef = useRef(sessions);
+  const activeIds = useRef(new Set<string>());
+  const lastRequest = useRef(new Map<string, { at: number; updatedAt: string }>());
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const inFlight = useRef(new Set<string>());
+  sessionsRef.current = sessions;
+  activeIds.current = new Set(sessions.map((session) => session.id));
+
+  useEffect(() => {
+    const ids = new Set(sessions.map((session) => session.id));
+    setActivity((current) => new Map([...current].filter(([id]) => ids.has(id))));
+    for (const [id, timer] of timers.current) {
+      if (!ids.has(id)) {
+        clearTimeout(timer);
+        timers.current.delete(id);
+      }
+    }
+    for (const id of lastRequest.current.keys()) {
+      if (!ids.has(id)) lastRequest.current.delete(id);
+    }
+    if (!pairing) return;
+
+    const fetchSession = (id: string) => {
+      timers.current.delete(id);
+      const session = sessionsRef.current.find((item) => item.id === id);
+      if (!session || !activeIds.current.has(id) || !pairing) return;
+      const previous = lastRequest.current.get(id);
+      if (previous?.updatedAt === session.updatedAt) return;
+      const delay = previous ? Math.max(0, 10_000 - (Date.now() - previous.at)) : 0;
+      if (inFlight.current.has(id) || delay > 0) {
+        timers.current.set(id, setTimeout(() => fetchSession(id), Math.max(delay, 250)));
+        return;
+      }
+      lastRequest.current.set(id, { at: Date.now(), updatedAt: session.updatedAt });
+      inFlight.current.add(id);
+      void fetch(`${pairing.url}/api/sessions/${encodeURIComponent(id)}/messages?limit=100`, {
+        headers: { Authorization: `Bearer ${pairing.token}` },
+      }).then(async (response) => {
+        if (!response.ok) throw new Error('Could not load activity');
+        const messages = await response.json() as SessionMessage[];
+        if (!activeIds.current.has(id) || sessionsRef.current.find((item) => item.id === id)?.updatedAt !== session.updatedAt) return;
+        setActivity((current) => new Map(current).set(id, messages));
+      }).catch(() => {}).finally(() => inFlight.current.delete(id));
+    };
+
+    sessions.forEach(({ id, updatedAt }) => {
+      const previous = lastRequest.current.get(id);
+      if (previous?.updatedAt === updatedAt || timers.current.has(id)) return;
+      const delay = previous ? Math.max(0, 10_000 - (Date.now() - previous.at)) : 0;
+      timers.current.set(id, setTimeout(() => fetchSession(id), delay));
+    });
+    return () => {
+      for (const timer of timers.current.values()) clearTimeout(timer);
+      timers.current.clear();
+    };
+  }, [sessions, pairing]);
+
+  return activity;
 }
 
 function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing: PairingDetails) => void; onCancel?: () => void }) {
@@ -700,19 +1022,9 @@ function ApprovalCard({ session, approval, pairing }: { session: AgentSession; a
     if (busy) return;
     setBusy(decision);
     setError('');
-    try {
-      const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/approval`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision, approvalId: approval.id, ...(answerMap ? { answers: answerMap } : {}) }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({})) as { error?: unknown };
-        setError(typeof body.error === 'string' ? body.error : 'Could not send your answer. Try again.');
-        setBusy(undefined);
-      }
-    } catch {
-      setError('Could not reach your PC. Try again.');
+    const error = await sendDecision(pairing, session.id, approval.id, decision, answerMap);
+    if (error) {
+      setError(error);
       setBusy(undefined);
     }
   }
