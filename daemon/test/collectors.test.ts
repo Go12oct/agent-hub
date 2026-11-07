@@ -767,9 +767,10 @@ describe('Antigravity transcript parser', () => {
 describe('Devin API mapping', () => {
   it('maps the documented status categories', () => {
     expect(mapDevinStatus('working')).toBe('working');
-    expect(mapDevinStatus('blocked')).toBe('done');
-    expect(mapDevinStatus('awaiting_input')).toBe('done');
-    expect(mapDevinStatus('waiting_for_user')).toBe('done');
+    expect(mapDevinStatus('blocked')).toBe('working');
+    expect(mapDevinStatus('awaiting_input')).toBe('working');
+    expect(mapDevinStatus('waiting_for_user')).toBe('working');
+    expect(mapDevinStatus('needs_input')).toBe('idle');
     expect(mapDevinStatus('finished')).toBe('done');
     expect(mapDevinStatus('suspend_requested')).toBe('idle');
     expect(mapDevinStatus('error')).toBe('error');
@@ -782,8 +783,76 @@ describe('Devin API mapping', () => {
     collector.start((session) => emitted.push(session));
     await new Promise((resolve) => setTimeout(resolve, 5));
     collector.stop();
-    expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'done', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
+    expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'working', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
     expect(emitted[0].lastMessage).toBeUndefined();
+  });
+
+  it('fetches all session pages up to 101 rows', async () => {
+    const urls: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+      const url = String(input);
+      urls.push(url);
+      const offset = Number(new URL(url).searchParams.get('offset'));
+      const sessions = offset === 0
+        ? Array.from({ length: 100 }, (_, i) => ({ session_id: `page-one-${i}`, status_enum: 'blocked' }))
+        : [{ session_id: 'page-two-0', status_enum: 'blocked' }];
+      return new Response(JSON.stringify({ sessions }));
+    };
+    const collector = new DevinCollector('not-a-real-key', fetcher);
+    const emitted: AgentSession[] = [];
+    const emit = ((session: AgentSession) => emitted.push(session)) as EmitSession;
+    collector.start(emit);
+    try {
+      await vi.waitFor(() => expect(emitted).toHaveLength(101));
+      expect(urls).toEqual([
+        'https://api.devin.ai/v1/sessions?limit=100&offset=0',
+        'https://api.devin.ai/v1/sessions?limit=100&offset=100',
+      ]);
+      expect(emitted.map((session) => session.id)).toContain('devin:page-two-0');
+      expect(emitted.every((session) => session.status === 'working')).toBe(true);
+    } finally {
+      collector.stop();
+    }
+  });
+
+  it('skips removals and upserts when a later session page fails', async () => {
+    const urls: string[] = [];
+    let listCalls = 0;
+    const fetcher: typeof fetch = async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith('offset=100')) return new Response('temporary failure', { status: 503 });
+      listCalls++;
+      const sessions = listCalls === 1
+        ? [{ session_id: 'existing', status_enum: 'working' }]
+        : Array.from({ length: 100 }, (_, i) => ({ session_id: `partial-${i}`, status_enum: 'working' }));
+      return new Response(JSON.stringify({ sessions }));
+    };
+    class TestDevinCollector extends DevinCollector {
+      refresh(): Promise<void> { return this.poll(); }
+    }
+    const collector = new TestDevinCollector('not-a-real-key', fetcher);
+    const emitted: AgentSession[] = [];
+    const removed: string[] = [];
+    const emit = ((session: AgentSession) => emitted.push(session)) as EmitSession;
+    emit.remove = (id) => removed.push(id);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    collector.start(emit);
+    try {
+      await vi.waitFor(() => expect(emitted).toHaveLength(1));
+      await collector.refresh();
+      expect(urls).toEqual([
+        'https://api.devin.ai/v1/sessions?limit=100&offset=0',
+        'https://api.devin.ai/v1/sessions?limit=100&offset=0',
+        'https://api.devin.ai/v1/sessions?limit=100&offset=100',
+      ]);
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]?.id).toBe('devin:existing');
+      expect(removed).toEqual([]);
+    } finally {
+      collector.stop();
+      warn.mockRestore();
+    }
   });
 
   it('maps message types and invalidates cached messages when updated_at changes', async () => {
@@ -792,7 +861,7 @@ describe('Devin API mapping', () => {
     let detailCalls = 0;
     const fetcher: typeof fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith('/sessions?limit=50')) {
+      if (url.endsWith('/sessions?limit=100&offset=0')) {
         const updatedAt = timestamps[Math.min(listCalls++, timestamps.length - 1)]!;
         return new Response(JSON.stringify({ sessions: [{
           session_id: 'abc', status_enum: 'blocked', title: 'Triage', updated_at: updatedAt,
@@ -851,7 +920,7 @@ describe('Devin API mapping', () => {
 
   it('uses the final non-tool message for the Devin preview and last role', async () => {
     const fetcher: typeof fetch = async (input) => {
-      if (String(input).endsWith('/sessions?limit=50')) {
+      if (String(input).endsWith('/sessions?limit=100&offset=0')) {
         return new Response(JSON.stringify({ sessions: [{
           session_id: 'preview', status_enum: 'blocked', updated_at: '2025-01-02T12:00:00.000Z',
         }] }));
@@ -870,7 +939,7 @@ describe('Devin API mapping', () => {
     collector.start((session) => emitted.push(session));
     try {
       await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(emitted[0].status).toBe('done');
+      expect(emitted[0].status).toBe('working');
       expect(emitted[0].lastMessage).toBeUndefined();
       await collector.getMessages('preview', 30);
       expect(emitted.at(-1)).toMatchObject({ lastMessage: 'Run tests', lastRole: 'user' });

@@ -28,7 +28,7 @@ interface CachedDevinMessages {
 export function mapDevinStatus(value: unknown): SessionStatus {
   switch (String(value || '').toLowerCase()) {
     case 'working': case 'running': return 'working';
-    case 'blocked': case 'awaiting_input': case 'waiting_for_user': return 'done';
+    case 'blocked': case 'awaiting_input': case 'waiting_for_user': return 'working';
     case 'finished': case 'completed': return 'done';
     case 'expired': case 'suspended': case 'stopped':
     case 'suspend_requested': case 'suspend_requested_frontend':
@@ -88,12 +88,19 @@ export class DevinCollector implements Collector {
   }
   protected async poll(): Promise<void> {
     try {
-      const response = await this.fetcher('https://api.devin.ai/v1/sessions?limit=50', {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json() as any;
-      const rows = Array.isArray(data) ? data : data.sessions || [];
+      const rows: any[] = [];
+      for (let page = 0; page < 10; page++) {
+        const offset = page * 100;
+        const response = await this.fetcher(`https://api.devin.ai/v1/sessions?limit=100&offset=${offset}`, {
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as any;
+        const pageRows = Array.isArray(data) ? data : data.sessions;
+        if (!Array.isArray(pageRows)) throw new Error('Invalid sessions response');
+        rows.push(...pageRows);
+        if (pageRows.length < 100) break;
+      }
       const active = new Set<string>();
       for (const row of rows) {
         const nativeId = String(row.session_id || row.id || '');
