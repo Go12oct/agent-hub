@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import {
+  AnimatePresence, LayoutGroup, animate, motion, useMotionValue, useTransform,
+} from 'motion/react';
 import {
   ArrowLeft, ArrowUp, Check, ShieldAlert, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, LogOut, QrCode,
   Search, Settings, TerminalSquare, Wifi, WifiOff, X,
@@ -9,6 +13,7 @@ import { Capacitor } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 import { agentLabels, type AgentKind, type AgentSession, type PendingApproval, type SessionMessage, sessionOrder } from '@agent-hub/shared';
 import { localNotificationId } from '../local-notifications';
+import { activityBuckets, approvalQueue, formatElapsed, type QueueItem } from '../home';
 import {
   candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
   type PairingDetails,
@@ -21,6 +26,23 @@ const agentMarks: Record<AgentKind, string> = {
 const statusLabels: Record<AgentSession['status'], string> = {
   needs_input: 'Needs you', working: 'Working', done: 'Done', idle: 'Idle', error: 'Error',
 };
+
+type NativeViewTransition = { finished: Promise<void> };
+type ViewTransitionDocument = Document & {
+  startViewTransition?: (callback: () => void) => NativeViewTransition;
+};
+
+function withViewTransition(update: () => void): NativeViewTransition | undefined {
+  const transitionDocument = document as ViewTransitionDocument;
+  if (transitionDocument.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    return transitionDocument.startViewTransition.call(document, () => flushSync(update));
+  }
+  update();
+}
+
+function sharedTransitionName(prefix: 'av' | 'title', sessionId: string): string {
+  return `${prefix}-${CSS.escape(sessionId)}`;
+}
 
 async function loadPairing(): Promise<PairingDetails | undefined> {
   const native = Capacitor.isNativePlatform();
@@ -76,6 +98,27 @@ function relativeTime(value?: string): string {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
+async function sendDecision(
+  pairing: PairingDetails,
+  sessionId: string,
+  approvalId: string,
+  decision: 'allow' | 'deny',
+  answers?: Record<string, string>,
+): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(sessionId)}/approval`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, approvalId, ...(answers ? { answers } : {}) }),
+    });
+    if (response.ok) return undefined;
+    const body = await response.json().catch(() => ({})) as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : 'Could not send your answer. Try again.';
+  } catch {
+    return 'Could not reach your PC. Try again.';
+  }
+}
+
 export function AgentHub() {
   const [pairing, setPairing] = useState<PairingDetails>();
   const [pairLink, setPairLink] = useState<string>();
@@ -83,11 +126,14 @@ export function AgentHub() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [selectedAgent, setSelectedAgent] = useState<AgentKind | 'all'>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'needs_input' | 'working'>('all');
   const [selectedId, setSelectedId] = useState<string>();
+  const [transitionSessionId, setTransitionSessionId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [hiddenApprovalIds, setHiddenApprovalIds] = useState<Set<string>>(new Set());
+  const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
+  const [finishedOpen, setFinishedOpen] = useState(false);
   const pairingRef = useRef<PairingDetails | undefined>(undefined);
   const failingOver = useRef(false);
   const previousStatuses = useRef(new Map<string, AgentSession['status']>());
@@ -114,8 +160,12 @@ export function AgentHub() {
     } catch {}
   }, []);
 
-  const openSession = useCallback((sessionId: string) => {
-    setSelectedId(sessionId);
+  const openSession = useCallback((sessionId: string, source?: HTMLElement) => {
+    if (source) {
+      source.querySelector<HTMLElement>('.avatar')?.style.setProperty('view-transition-name', sharedTransitionName('av', sessionId));
+      source.querySelector<HTMLElement>('.deck-title, .tile-title, .row-title')?.style.setProperty('view-transition-name', sharedTransitionName('title', sessionId));
+    }
+    withViewTransition(() => setSelectedId(sessionId));
     void clearLocalNotifications([
       localNotificationId(`session:${sessionId}`),
       ...[...(previousApprovals.current.get(sessionId) ?? [])].map((id) => localNotificationId(`approval:${id}`)),
@@ -286,10 +336,32 @@ export function AgentHub() {
 
   const filtered = useMemo(() => sessions.filter((session) =>
     (selectedAgent === 'all' || session.agent === selectedAgent) &&
-    (statusFilter === 'all' || session.status === statusFilter) &&
     (!search || `${session.title} ${session.project || ''} ${session.lastMessage || ''}`.toLowerCase().includes(search.toLowerCase())),
-  ).sort(sessionOrder), [sessions, selectedAgent, statusFilter, search]);
+  ).sort(sessionOrder), [sessions, selectedAgent, search]);
   const groups = feedGroups(filtered);
+  const queue = useMemo(() => approvalQueue(filtered, hiddenApprovalIds), [filtered, hiddenApprovalIds]);
+  const activeTiles = useMemo(() => filtered
+    .filter((session) => session.status === 'needs_input' || session.status === 'working')
+    .sort((a, b) => (a.status === b.status ? Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : a.status === 'needs_input' ? -1 : 1)), [filtered]);
+  const workingCount = filtered.filter((session) => session.status === 'working').length;
+  const activity = useActivity(activeTiles, pairing);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!activeTiles.some((session) => session.status === 'working' && session.startedAt)) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activeTiles]);
+  useEffect(() => {
+    const currentApprovalIds = new Set(sessions.flatMap((session) =>
+      (session.approvals ?? (session.approval ? [session.approval] : [])).map((approval) => approval.id),
+    ));
+    setHiddenApprovalIds((current) => {
+      const next = new Set([...current].filter((id) => currentApprovalIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    setDecisionErrors((current) => Object.fromEntries(Object.entries(current).filter(([id]) => currentApprovalIds.has(id))));
+  }, [sessions]);
   const selectedSession = sessions.find((session) => session.id === selectedId);
   const counts = useMemo(() => {
     const map = new Map<AgentKind, number>();
@@ -297,6 +369,18 @@ export function AgentHub() {
     return map;
   }, [sessions]);
   const tabs = agentOrder.filter((agent) => agent !== 'codex-cloud' || counts.has(agent));
+
+  useEffect(() => {
+    const screen = document.querySelector<HTMLElement>('.screen');
+    const background = screen ? getComputedStyle(screen).getPropertyValue('--screen-bg').trim() : '';
+    document.body.style.backgroundColor = background;
+    document.documentElement.style.backgroundColor = background;
+  }, [pairLink, pairing, ready, selectedAgent, selectedId, selectedSession]);
+
+  useEffect(() => () => {
+    document.body.style.backgroundColor = '';
+    document.documentElement.style.backgroundColor = '';
+  }, []);
 
   async function disconnect() {
     if (Capacitor.isNativePlatform()) await Preferences.remove({ key: 'pairing' });
@@ -319,18 +403,51 @@ export function AgentHub() {
   }
 
   if (selectedSession) {
-    return <ChatView key={selectedSession.id} session={selectedSession} pairing={pairing} onBack={() => setSelectedId(undefined)} />;
+    return (
+      <ChatView
+        key={selectedSession.id}
+        session={selectedSession}
+        pairing={pairing}
+        onBack={() => {
+          const transition = withViewTransition(() => {
+            setTransitionSessionId(selectedSession.id);
+            setSelectedId(undefined);
+          });
+          if (transition) {
+            void transition.finished.then(
+              () => setTransitionSessionId(undefined),
+              () => setTransitionSessionId(undefined),
+            );
+          } else {
+            setTransitionSessionId(undefined);
+          }
+        }}
+      />
+    );
   }
 
-  const scoped = selectedAgent === 'all' ? sessions : sessions.filter((session) => session.agent === selectedAgent);
-  const needsCount = scoped.filter((session) => session.status === 'needs_input').length;
-  const workingCount = scoped.filter((session) => session.status === 'working').length;
-
-  const todayCount = scoped.filter((session) => Date.parse(session.updatedAt) >= new Date().setHours(0, 0, 0, 0)).length;
-  const toggleStatus = (value: 'needs_input' | 'working') => setStatusFilter((current) => current === value ? 'all' : value);
+  async function decide(item: QueueItem, decision: 'allow' | 'deny') {
+    if (item.kind !== 'approval' || !pairing) return;
+    const { session, approval } = item;
+    setHiddenApprovalIds((current) => new Set(current).add(approval.id));
+    setDecisionErrors((current) => {
+      const next = { ...current };
+      delete next[approval.id];
+      return next;
+    });
+    const error = await sendDecision(pairing, session.id, approval.id, decision);
+    if (error) {
+      setHiddenApprovalIds((current) => {
+        const next = new Set(current);
+        next.delete(approval.id);
+        return next;
+      });
+      setDecisionErrors((current) => ({ ...current, [approval.id]: error }));
+    }
+  }
 
   return (
-    <main className="screen">
+    <main className="screen" data-agent={selectedAgent}>
       <header className="app-bar">
         {searchOpen ? (
           <div className="search-field">
@@ -347,25 +464,16 @@ export function AgentHub() {
                   {connection === 'connected' ? 'Live from your PC' : connection === 'offline' ? 'PC offline' : 'Connecting'}
                 </button>
               </span>
-              <h1>Agents</h1>
+              <h1>{queue.length ? <><em>{queue.length}</em> need{queue.length === 1 ? 's' : ''} you</> : 'All clear'}</h1>
+              <p className="app-sub">{queue.length
+                ? 'Swipe right to allow, left to deny'
+                : workingCount ? `${workingCount} agent${workingCount === 1 ? '' : 's'} working` : 'Nothing running'}</p>
             </div>
-            <button className="icon-btn glass" aria-label="Search" onClick={() => { setStatusFilter('all'); setSearchOpen(true); }}><Search size={19} /></button>
+            <button className="icon-btn glass" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={19} /></button>
             <button className="icon-btn glass" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button>
           </>
         )}
       </header>
-
-      {!search && (
-        <section className="overview" aria-label="Overview">
-          <button className={`stat needs_input${needsCount ? ' has' : ''}${statusFilter === 'needs_input' ? ' active' : ''}`} aria-pressed={statusFilter === 'needs_input'} onClick={() => toggleStatus('needs_input')}>
-            <span>Needs you</span><strong>{needsCount}</strong>
-          </button>
-          <button className={`stat working${statusFilter === 'working' ? ' active' : ''}`} aria-pressed={statusFilter === 'working'} onClick={() => toggleStatus('working')}>
-            <span>Working</span><strong>{workingCount}</strong>
-          </button>
-          <div className="stat today"><span>Today</span><strong>{todayCount}</strong></div>
-        </section>
-      )}
 
       <nav className="tabs" aria-label="Filter by app">
         <button className={selectedAgent === 'all' ? 'tab active' : 'tab'} onClick={() => setSelectedAgent('all')}>All <span>{sessions.length}</span></button>
@@ -377,15 +485,36 @@ export function AgentHub() {
       </nav>
 
       <div className="list">
-        {filtered.length === 0 ? (
-          statusFilter !== 'all' && connection !== 'offline'
-            ? <div className="empty"><h2>{statusFilter === 'needs_input' ? 'Nothing needs you' : 'No agent is working'}</h2><p>{statusFilter === 'needs_input' ? 'Approvals and questions from your agents show up here.' : 'Running sessions show up here live.'}</p></div>
-            : <Empty connection={connection} agent={selectedAgent} />
-        ) : (
+        {filtered.length === 0 ? <Empty connection={connection} agent={selectedAgent} /> : (
           <>
-            {groups.needsYou.length > 0 && <Group title="Needs you" tone="needs_input" sessions={groups.needsYou} onOpen={openSession} />}
-            {groups.working.length > 0 && <Group title="Working" tone="working" sessions={groups.working} onOpen={openSession} />}
-            {dayGroups(groups.recent).map(([title, items]) => <Group key={title} title={title} sessions={items} onOpen={openSession} />)}
+            <ApprovalDeck items={queue} errors={decisionErrors} onOpen={openSession} onDecide={(item, value) => void decide(item, value)} />
+            <div className="section-head"><span>Agents</span><span>{workingCount} working</span></div>
+            <LayoutGroup>
+              <div className="agent-tiles">
+                <AnimatePresence initial={false}>
+                  {activeTiles.map((session) => (
+                    <AgentTile
+                      key={session.id}
+                      session={session}
+                      messages={activity.get(session.id) ?? []}
+                      now={now}
+                      transitionSessionId={transitionSessionId}
+                      onOpen={(source) => openSession(session.id, source)}
+                    />
+                  ))}
+                </AnimatePresence>
+              </div>
+            </LayoutGroup>
+            {groups.recent.length > 0 && (
+              <>
+                <button className="finished-toggle" onClick={() => setFinishedOpen((value) => !value)}>
+                  <span>{groups.recent.length} finished or idle</span><span>{search || finishedOpen ? 'Hide' : 'Show'}</span>
+                </button>
+                {(search || finishedOpen) && dayGroups(groups.recent).map(([title, items]) => (
+                  <Group key={title} title={title} sessions={items} transitionSessionId={transitionSessionId} onOpen={openSession} />
+                ))}
+              </>
+            )}
           </>
         )}
       </div>
@@ -409,6 +538,273 @@ export function AgentHub() {
       )}
     </main>
   );
+}
+
+function queueItemKey(item: QueueItem): string {
+  return item.kind === 'approval' ? `approval:${item.approval.id}` : `input:${item.session.id}`;
+}
+
+function ApprovalDeck({
+  items,
+  errors,
+  onOpen,
+  onDecide,
+}: {
+  items: QueueItem[];
+  errors: Record<string, string>;
+  onOpen: (id: string, source?: HTMLElement) => void;
+  onDecide: (item: QueueItem, decision: 'allow' | 'deny') => void;
+}) {
+  if (!items.length) {
+    return <div className="deck-empty"><strong>Nothing needs you</strong><span>You'll get a ping when an agent asks.</span></div>;
+  }
+
+  return (
+    <div className="approval-deck">
+      {items.map((item, depth) => (
+        <DeckCard
+          key={queueItemKey(item)}
+          item={item}
+          depth={depth}
+          error={item.kind === 'approval' ? errors[item.approval.id] : undefined}
+          onOpen={(source) => onOpen(item.session.id, source)}
+          onDecide={(decision) => onDecide(item, decision)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DeckCard({
+  item,
+  depth,
+  error,
+  onOpen,
+  onDecide,
+}: {
+  item: QueueItem;
+  depth: number;
+  error?: string;
+  onOpen: (source: HTMLElement) => void;
+  onDecide: (decision: 'allow' | 'deny') => void;
+}) {
+  const x = useMotionValue(0);
+  const rotate = useTransform(x, [-240, 0, 240], [-10, 0, 10]);
+  const allowOpacity = useTransform(x, [0, 100], [0, 1]);
+  const denyOpacity = useTransform(x, [-100, 0], [1, 0]);
+  const committing = useRef(false);
+  const approval = item.kind === 'approval' ? item.approval : undefined;
+  const questions = approval?.questions ?? [];
+  const swipeable = Boolean(approval && questions.length === 0 && depth === 0);
+  const preview = item.kind === 'input' && item.session.lastMessage ? previewText(item.session.lastMessage) : '';
+  const depthIndex = Math.min(depth, 3);
+  const y = [0, 12, 24, 24][depthIndex]!;
+  const scale = [1, 0.95, 0.9, 0.9][depthIndex]!;
+
+  async function flyOut(decision: 'allow' | 'deny', velocity = 0) {
+    if (!swipeable || item.kind !== 'approval' || committing.current) return;
+    committing.current = true;
+    const direction = decision === 'allow' ? 1 : -1;
+    await animate(x, direction * (window.innerWidth + 160), {
+      type: 'spring',
+      stiffness: 300,
+      damping: 32,
+      velocity,
+    });
+    onDecide(decision);
+  }
+
+  function endDrag(info: { offset: { x: number }; velocity: { x: number } }) {
+    const offsetDirection = Math.sign(info.offset.x);
+    const velocityDirection = Math.sign(info.velocity.x);
+    const offsetCommits = Math.abs(info.offset.x) > 100;
+    const velocityCommits = Math.abs(info.velocity.x) > 600 && (!offsetDirection || velocityDirection === offsetDirection);
+    if (offsetCommits || velocityCommits) {
+      const direction = offsetCommits ? offsetDirection : velocityDirection;
+      const velocity = velocityDirection === direction ? info.velocity.x : 0;
+      void flyOut(direction > 0 ? 'allow' : 'deny', velocity);
+      return;
+    }
+    void animate(x, 0, { type: 'spring', stiffness: 500, damping: 34 });
+  }
+
+  return (
+    <motion.div
+      className="deck-card needs_input"
+      data-depth={depthIndex}
+      drag={swipeable ? 'x' : false}
+      dragElastic={0.9}
+      dragMomentum={false}
+      initial={error ? { scale: 0.96, opacity: 0 } : false}
+      animate={{ y, scale, opacity: depthIndex >= 3 ? 0 : 1 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+      style={{ x, rotate, zIndex: 10 - depth }}
+      onPointerDownCapture={(event) => {
+        if (event.target instanceof Element && event.target.closest('button')) event.stopPropagation();
+      }}
+      onDragEnd={(_, info) => endDrag(info)}
+    >
+      <motion.span className="deck-stamp allow-stamp" style={{ opacity: allowOpacity }}>ALLOW</motion.span>
+      <motion.span className="deck-stamp deny-stamp" style={{ opacity: denyOpacity }}>DENY</motion.span>
+      <div className="deck-who">
+        <Avatar agent={item.session.agent} />
+        <span><strong className={`agent-name ${item.session.agent}`}>{agentLabels[item.session.agent]}</strong><span>{item.session.project}</span></span>
+        <time>{relativeTime(approval?.requestedAt ?? item.session.updatedAt)}</time>
+      </div>
+      <h2 className="deck-title">{item.session.title}</h2>
+      {approval ? (
+        questions.length > 0
+          ? <p className="deck-question">{questions[0]?.question}</p>
+          : (
+            <div className="deck-tool">
+              <div className="deck-summary">{approval.summary}</div>
+              {approval.detail && <div className="deck-detail">{approval.detail}</div>}
+            </div>
+          )
+      ) : <p className="deck-input">{preview}</p>}
+      {error && <div className="alert small">{error}</div>}
+      {approval && questions.length === 0 ? (
+        <>
+          <div className="deck-actions">
+            <button className="deck-deny" onClick={() => void flyOut('deny')}>Deny</button>
+            <button className="deck-allow" onClick={() => void flyOut('allow')}>Allow</button>
+          </div>
+          <button className="deck-open" onClick={(event) => {
+            const source = event.currentTarget.closest<HTMLElement>('.deck-card');
+            if (source) onOpen(source);
+          }}>Open chat</button>
+        </>
+      ) : (
+        <button className="deck-primary" onClick={(event) => {
+          const source = event.currentTarget.closest<HTMLElement>('.deck-card');
+          if (source) onOpen(source);
+        }}>{approval ? 'Answer' : 'Reply'}</button>
+      )}
+    </motion.div>
+  );
+}
+
+function AgentTile({
+  session,
+  messages,
+  now,
+  transitionSessionId,
+  onOpen,
+}: {
+  session: AgentSession;
+  messages: SessionMessage[];
+  now: number;
+  transitionSessionId?: string;
+  onOpen: (source: HTMLElement) => void;
+}) {
+  const shared = session.id === transitionSessionId;
+  const needsInput = session.status === 'needs_input';
+  const approval = (session.approvals ?? (session.approval ? [session.approval] : []))[0];
+  const current = needsInput ? approval?.summary : session.lastMessage ? previewText(session.lastMessage) : '';
+  const hasTimestamps = messages.some((message) => Boolean(message.at) && Number.isFinite(Date.parse(message.at!)));
+  const buckets = activityBuckets(messages, now);
+  const maxBucket = Math.max(1, ...buckets);
+  const elapsedAt = session.startedAt ? Date.parse(session.startedAt) : undefined;
+  const steps = messages.length >= 100 ? '100+' : messages.filter((message) => message.role === 'tool').length;
+
+  return (
+    <motion.button
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+      className={`agent-tile ${session.status}`}
+      onClick={(event) => onOpen(event.currentTarget)}
+    >
+      <span className="tile-top">
+        <Avatar agent={session.agent} viewTransitionName={shared ? sharedTransitionName('av', session.id) : undefined} />
+        <span className="tile-agent"><strong className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
+        <span className={`status ${session.status}`}>
+          {statusLabels[session.status]}
+        </span>
+      </span>
+      <span className="tile-title" style={shared ? { viewTransitionName: sharedTransitionName('title', session.id) } : undefined}>{session.title}</span>
+      {current && <span className="tile-current">{current}</span>}
+      {hasTimestamps && (
+        <span className="activity-track" aria-label="Recent activity">
+          {buckets.map((count, index) => (
+            <i
+              key={index}
+              className={needsInput && index === buckets.length - 1 ? 'ask' : count ? 'active' : ''}
+              style={{ height: `${needsInput && index === buckets.length - 1 ? 100 : count ? 30 + (count / maxBucket) * 70 : 12}%` }}
+            />
+          ))}
+        </span>
+      )}
+      <span className="tile-meta">
+        {session.startedAt && <span>{formatElapsed(now - (Number.isFinite(elapsedAt) ? elapsedAt! : now))}</span>}
+        <span>{steps} {steps === 1 ? 'step' : 'steps'}</span><span>now</span>
+      </span>
+    </motion.button>
+  );
+}
+
+function useActivity(sessions: AgentSession[], pairing?: PairingDetails): Map<string, SessionMessage[]> {
+  const [activity, setActivity] = useState<Map<string, SessionMessage[]>>(new Map());
+  const sessionsRef = useRef(sessions);
+  const activeIds = useRef(new Set<string>());
+  const lastRequest = useRef(new Map<string, { at: number; updatedAt: string }>());
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const inFlight = useRef(new Set<string>());
+  sessionsRef.current = sessions;
+  activeIds.current = new Set(sessions.map((session) => session.id));
+
+  useEffect(() => {
+    const ids = new Set(sessions.map((session) => session.id));
+    setActivity((current) => new Map([...current].filter(([id]) => ids.has(id))));
+    for (const [id, timer] of timers.current) {
+      if (!ids.has(id)) {
+        clearTimeout(timer);
+        timers.current.delete(id);
+      }
+    }
+    for (const id of lastRequest.current.keys()) {
+      if (!ids.has(id)) lastRequest.current.delete(id);
+    }
+    if (!pairing) return;
+
+    const fetchSession = (id: string) => {
+      timers.current.delete(id);
+      const session = sessionsRef.current.find((item) => item.id === id);
+      if (!session || !activeIds.current.has(id) || !pairing) return;
+      const previous = lastRequest.current.get(id);
+      if (previous?.updatedAt === session.updatedAt) return;
+      const delay = previous ? Math.max(0, 10_000 - (Date.now() - previous.at)) : 0;
+      if (inFlight.current.has(id) || delay > 0) {
+        timers.current.set(id, setTimeout(() => fetchSession(id), Math.max(delay, 250)));
+        return;
+      }
+      lastRequest.current.set(id, { at: Date.now(), updatedAt: session.updatedAt });
+      inFlight.current.add(id);
+      void fetch(`${pairing.url}/api/sessions/${encodeURIComponent(id)}/messages?limit=100`, {
+        headers: { Authorization: `Bearer ${pairing.token}` },
+      }).then(async (response) => {
+        if (!response.ok) throw new Error('Could not load activity');
+        const messages = await response.json() as SessionMessage[];
+        if (!activeIds.current.has(id) || sessionsRef.current.find((item) => item.id === id)?.updatedAt !== session.updatedAt) return;
+        setActivity((current) => new Map(current).set(id, messages));
+      }).catch(() => {}).finally(() => inFlight.current.delete(id));
+    };
+
+    sessions.forEach(({ id, updatedAt }) => {
+      const previous = lastRequest.current.get(id);
+      if (previous?.updatedAt === updatedAt || timers.current.has(id)) return;
+      const delay = previous ? Math.max(0, 10_000 - (Date.now() - previous.at)) : 0;
+      timers.current.set(id, setTimeout(() => fetchSession(id), delay));
+    });
+    return () => {
+      for (const timer of timers.current.values()) clearTimeout(timer);
+      timers.current.clear();
+    };
+  }, [sessions, pairing]);
+
+  return activity;
 }
 
 function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing: PairingDetails) => void; onCancel?: () => void }) {
@@ -495,34 +891,82 @@ function dayGroups(sessions: AgentSession[]): Array<[string, AgentSession[]]> {
   return buckets.filter(([, items]) => items.length > 0);
 }
 
-function Avatar({ agent, size = 'md' }: { agent: AgentKind; size?: 'sm' | 'md' }) {
-  return <span className={`avatar ${size}`} aria-hidden="true">{agentMarks[agent]}</span>;
+function Avatar({
+  agent,
+  size = 'md',
+  viewTransitionName,
+}: {
+  agent: AgentKind;
+  size?: 'sm' | 'md';
+  viewTransitionName?: string;
+}) {
+  return <span className={`avatar ${agent} ${size}`} style={viewTransitionName ? { viewTransitionName } : undefined} aria-hidden="true">{agentMarks[agent]}</span>;
 }
 
-function Group({ title, tone, sessions, onOpen }: { title: string; tone?: string; sessions: AgentSession[]; onOpen: (id: string) => void }) {
+function Group({
+  title,
+  tone,
+  sessions,
+  transitionSessionId,
+  onOpen,
+}: {
+  title: string;
+  tone?: string;
+  sessions: AgentSession[];
+  transitionSessionId?: string;
+  onOpen: (id: string, source?: HTMLElement) => void;
+}) {
   return (
     <section className={`group ${tone || ''}`}>
       <h2>{title} <span>{sessions.length}</span></h2>
-      <div className="cards">
-        {sessions.map((session) => <Row key={session.id} session={session} onOpen={() => onOpen(session.id)} />)}
-      </div>
+      <LayoutGroup>
+        <div className="cards">
+          <AnimatePresence initial={false}>
+            {sessions.map((session) => (
+              <Row
+                key={session.id}
+                session={session}
+                transitionSessionId={transitionSessionId}
+                onOpen={(source) => onOpen(session.id, source)}
+              />
+            ))}
+          </AnimatePresence>
+        </div>
+      </LayoutGroup>
     </section>
   );
 }
 
-function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void }) {
+function Row({
+  session,
+  transitionSessionId,
+  onOpen,
+}: {
+  session: AgentSession;
+  transitionSessionId?: string;
+  onOpen: (source: HTMLElement) => void;
+}) {
+  const shared = session.id === transitionSessionId;
   const preview = session.lastMessage ? previewText(session.lastMessage) : '';
   const request = session.status === 'needs_input' ? (session.approvals ?? (session.approval ? [session.approval] : []))[0] : undefined;
   return (
-    <button className={`row ${session.status}`} onClick={onOpen}>
-      <Avatar agent={session.agent} />
+    <motion.button
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+      className={`row ${session.status}`}
+      onClick={(event) => onOpen(event.currentTarget)}
+    >
+      <Avatar agent={session.agent} viewTransitionName={shared ? sharedTransitionName('av', session.id) : undefined} />
       <span className="row-body">
         <span className="row-top">
           <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
-          {(session.status === 'needs_input' || session.status === 'working' || session.status === 'error') && <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>}
+          <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>
           <span className="row-time">{relativeTime(session.updatedAt)}</span>
         </span>
-        <span className="row-title">{session.title}</span>
+        <span className="row-title" style={shared ? { viewTransitionName: sharedTransitionName('title', session.id) } : undefined}>{session.title}</span>
         {request
           ? <span className="row-prompt">{request.summary}</span>
           : preview && <span className="row-preview">{session.lastRole === 'user' ? <b>You: </b> : ''}{preview}</span>}
@@ -530,7 +974,7 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
           <span className="row-meta">{[session.project, session.branch].filter(Boolean).join(' · ')}</span>
         )}
       </span>
-    </button>
+    </motion.button>
   );
 }
 
@@ -629,8 +1073,9 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
     <main className="chat">
       <header className="chat-bar">
         <button className="icon-btn" aria-label="Back" onClick={onBack}><ArrowLeft size={22} /></button>
+        <Avatar agent={session.agent} viewTransitionName={sharedTransitionName('av', session.id)} />
         <div className="chat-heading">
-          <strong>{session.title}</strong>
+          <strong style={{ viewTransitionName: sharedTransitionName('title', session.id) }}>{session.title}</strong>
           <span>
             <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
             <span className={`dot ${session.status}`} />{statusLabels[session.status]}
@@ -700,19 +1145,9 @@ function ApprovalCard({ session, approval, pairing }: { session: AgentSession; a
     if (busy) return;
     setBusy(decision);
     setError('');
-    try {
-      const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/approval`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision, approvalId: approval.id, ...(answerMap ? { answers: answerMap } : {}) }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({})) as { error?: unknown };
-        setError(typeof body.error === 'string' ? body.error : 'Could not send your answer. Try again.');
-        setBusy(undefined);
-      }
-    } catch {
-      setError('Could not reach your PC. Try again.');
+    const error = await sendDecision(pairing, session.id, approval.id, decision, answerMap);
+    if (error) {
+      setError(error);
       setBusy(undefined);
     }
   }
