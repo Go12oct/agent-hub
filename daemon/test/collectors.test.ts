@@ -93,6 +93,29 @@ async function collectFixture(
 }
 
 describe('Codex transcript parser', () => {
+  it('keeps real text blocks after filtering injected user context blocks', () => {
+    const parsed = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'codex-content-blocks' } },
+      {
+        type: 'response_item',
+        timestamp: '2025-01-02T10:00:01.000Z',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [
+            { input_text: '<environment_context>Injected machine context</environment_context>' },
+            { input_text: 'Fix the tests' },
+          ],
+        },
+      },
+    ], 'codex-content-blocks', Date.parse('2025-01-02T10:00:02.000Z'));
+
+    expect(parsed.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: 'Fix the tests' },
+    ]);
+    expect(parsed.session.title).toBe('Fix the tests');
+  });
+
   it('omits injected prompt context from chat messages and session previews', () => {
     const parsed = parseCodexRecords([
       { type: 'session_meta', payload: { id: 'codex-preamble' } },

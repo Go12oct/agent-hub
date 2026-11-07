@@ -12,6 +12,17 @@ function isCodexPromptPreamble(text: string): boolean {
   return /^(?:<environment_context>|<instructions>|<user_instructions>|<system-reminder>|# AGENTS\.md instructions)/i.test(text.trim());
 }
 
+function textFromUserContent(content: unknown): string {
+  const blocks = Array.isArray(content) ? content : [content];
+  return blocks.map((block) => {
+    if (typeof block === 'string') return block;
+    if (!block || typeof block !== 'object') return '';
+    const item = block as Record<string, unknown>;
+    if (typeof item.input_text === 'string') return item.input_text;
+    return typeof item.text === 'string' ? item.text : '';
+  }).filter((text) => text && !isCodexPromptPreamble(text)).join('\n');
+}
+
 export interface CodexHookPayload {
   session_id?: string;
   hook_event_name?: string;
@@ -92,7 +103,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     if (record.type === 'response_item' && payload.type === 'message') {
       const role = payload.role;
       if (role === 'user' || role === 'assistant') lastActivityIndex = index;
-      const text = textFromContent(payload.content);
+      const text = role === 'user' ? textFromUserContent(payload.content) : textFromContent(payload.content);
       if (!text) continue;
       if (role === 'user') {
         if (isCodexPromptPreamble(text)) continue;
