@@ -217,22 +217,41 @@ describe('Claude hook override expiry', () => {
       cwd: '/tmp/project',
     });
     const notificationParsed = parseClaudeRecords([], 'notification-hook', new Date(base).toISOString(), base);
-    notificationNow = base + 360_001;
+    notificationNow = base + 29 * 60_000;
     const notificationSession = notificationCollector.refresh({
       session: notificationParsed.session,
       statusFacts: notificationParsed.statusFacts,
     }, base, notificationNow);
     expect(notificationSession.status).toBe('needs_input');
     expect(notificationCollector.retains(notificationSession)).toBe(true);
-    const changedTranscript = notificationCollector.refresh({
+    notificationNow = base + 31 * 60_000;
+    const expiredNotification = notificationCollector.refresh({
       session: notificationParsed.session,
       statusFacts: notificationParsed.statusFacts,
-    }, base + 1, notificationNow);
+    }, base, notificationNow);
+    expect(expiredNotification.status).not.toBe('needs_input');
+    expect(notificationCollector.retains(expiredNotification)).toBe(false);
+
+    let changedNow = base;
+    const changedNotificationCollector = new TestClaudeCollector({ approvalHoldMs: 300_000, now: () => changedNow });
+    await changedNotificationCollector.applyHook({
+      session_id: 'notification-changed',
+      hook_event_name: 'Notification',
+      notification_type: 'permission_prompt',
+      cwd: '/tmp/project',
+    });
+    const changedParsed = parseClaudeRecords([], 'notification-changed', new Date(base).toISOString(), base);
+    changedNow = base + 60_000;
+    const changedTranscript = changedNotificationCollector.refresh({
+      session: changedParsed.session,
+      statusFacts: changedParsed.statusFacts,
+    }, base + 1, changedNow);
     expect(changedTranscript.status).not.toBe('needs_input');
-    expect(notificationCollector.retains(changedTranscript)).toBe(false);
+    expect(changedNotificationCollector.retains(changedTranscript)).toBe(false);
 
     await collector.stop();
     await notificationCollector.stop();
+    await changedNotificationCollector.stop();
   });
 });
 
@@ -494,6 +513,8 @@ describe('Claude Code hooks', () => {
     expect(claudeHookOverride(101, 'needs_input', 100, 100)).toBeUndefined();
     expect(claudeHookOverride(100, 'needs_input', 100, 460_001, 300_000, 'PermissionRequest')).toBeUndefined();
     expect(claudeHookOverride(100, 'needs_input', 100, 460_001, 300_000, 'Notification')).toBe('needs_input');
+    expect(claudeHookOverride(100, 'needs_input', 100, 100 + 29 * 60_000, 300_000, 'Notification')).toBe('needs_input');
+    expect(claudeHookOverride(100, 'needs_input', 100, 100 + 31 * 60_000, 300_000, 'Notification')).toBeUndefined();
     const collector = new ClaudeCollector();
     const emitted: any[] = [];
     const emit = (session: AgentSession) => emitted.push(session);

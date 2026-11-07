@@ -8,6 +8,8 @@ import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
 
+const notificationPromptTtlMs = 30 * 60_000;
+
 export function claudeTitle(text: string): string | undefined {
   const clean = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
   if (!clean || /^(<environment_context>|<instructions>)/i.test(clean)) return undefined;
@@ -38,6 +40,19 @@ export function mapClaudeHook(event: string, payload: ClaudeHookPayload = {}): S
   return undefined;
 }
 
+function hookOverrideExpired(
+  status: SessionStatus,
+  event: string | undefined,
+  hookAt: number,
+  now: number,
+  approvalHoldMs: number,
+): boolean {
+  if (status !== 'needs_input') return false;
+  if (event === 'PermissionRequest') return now - hookAt > approvalHoldMs + 60_000;
+  if (event === 'Notification') return now - hookAt > notificationPromptTtlMs;
+  return false;
+}
+
 export function claudeHookOverride(
   fileModifiedAt: number,
   status: SessionStatus,
@@ -46,7 +61,7 @@ export function claudeHookOverride(
   approvalHoldMs = defaultApprovalHoldSeconds * 1000,
   hookEvent?: string,
 ): SessionStatus | undefined {
-  if (status === 'needs_input' && hookEvent === 'PermissionRequest' && now - hookAt > approvalHoldMs + 60_000) return undefined;
+  if (hookOverrideExpired(status, hookEvent, hookAt, now, approvalHoldMs)) return undefined;
   return fileModifiedAt <= hookAt ? status : undefined;
 }
 
@@ -158,7 +173,7 @@ export class ClaudeCollector extends WatchedCollector {
   }
   private activeHookOverride(nativeId: string, now = this.now()): { status: SessionStatus; at: number; message?: string; event: string } | undefined {
     const hook = this.hookOverrides.get(nativeId);
-    if (hook?.status === 'needs_input' && hook.event === 'PermissionRequest' && now - hook.at > this.approvalHoldMs + 60_000) {
+    if (hook && hookOverrideExpired(hook.status, hook.event, hook.at, now, this.approvalHoldMs)) {
       this.hookOverrides.delete(nativeId);
       return undefined;
     }
