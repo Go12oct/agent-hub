@@ -60,12 +60,14 @@ $env:PATH = "$installDir;$env:PATH"
 if ($LASTEXITCODE -ne 0) {
   Write-Warning "The Agent Hub Firewall rule was not added. Run 'agent-hub firewall' as administrator."
 }
-if (Get-Command claude -ErrorAction SilentlyContinue) {
+$claudeConfigDir = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE ".claude" }
+if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfigDir -PathType Container)) {
   & $shim install-claude-hooks
 } else {
   Write-Host "Claude Code was not found; skipping Claude hooks."
 }
-if (Get-Command codex -ErrorAction SilentlyContinue) {
+$codexConfigDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE ".codex" }
+if ((Get-Command codex -ErrorAction SilentlyContinue) -or ($codexConfigDir -and (Test-Path $codexConfigDir -PathType Container))) {
   & $shim install-codex-hooks
 } else {
   Write-Host "Codex was not found; skipping Codex hooks."
