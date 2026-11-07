@@ -124,6 +124,23 @@ function quoteExecutable(executable: string): string {
   return `"${executable}"`;
 }
 
+function workingDirectoryForReply(agent: ReplyAgent, cwd: string | undefined): string {
+  if (cwd === undefined) {
+    if (agent !== 'antigravity') {
+      throw new ReplyFailedError('', "Couldn't find this chat's project folder");
+    }
+    return os.homedir();
+  }
+  let isDirectory = false;
+  try {
+    isDirectory = statSync(cwd).isDirectory();
+  } catch {
+    isDirectory = false;
+  }
+  if (!isDirectory) throw new ReplyFailedError('', `Project folder not found: ${cwd}`);
+  return cwd;
+}
+
 export function buildReplyCommand(
   agent: ReplyAgent,
   nativeId: string,
@@ -141,22 +158,7 @@ export function buildReplyCommand(
     throw new ReplyFailedError('', 'Unsafe CLI path');
   }
   const command = shell ? quoteExecutable(executable) : executable;
-  let workingDirectory: string;
-  if (cwd === undefined) {
-    if (agent !== 'antigravity') {
-      throw new ReplyFailedError('', "Couldn't find this chat's project folder");
-    }
-    workingDirectory = os.homedir();
-  } else {
-    let isDirectory = false;
-    try {
-      isDirectory = statSync(cwd).isDirectory();
-    } catch {
-      isDirectory = false;
-    }
-    if (!isDirectory) throw new ReplyFailedError('', `Project folder not found: ${cwd}`);
-    workingDirectory = cwd;
-  }
+  const workingDirectory = workingDirectoryForReply(agent, cwd);
 
   if (agent === 'codex') {
     return {
@@ -300,6 +302,7 @@ export class LocalReplyRunner implements ReplyRunner {
       throw new ReplyFailedError('', `Failed to start ${session.agent}`);
     }
 
+    if (agent === 'claude-code') workingDirectoryForReply(agent, session.cwd);
     if (agent === 'claude-code') {
       this.backgroundInFlight.add(session.id);
       this.notify(session.id);

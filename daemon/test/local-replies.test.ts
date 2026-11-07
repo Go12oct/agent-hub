@@ -242,6 +242,25 @@ describe('LocalReplyRunner', () => {
     expect(runner.isRunning(claude.id)).toBe(false);
   });
 
+  it('validates a background Claude session cwd before running agents or stop', async () => {
+    const calls: string[][] = [];
+    const commandRunner: CommandRunner = async (_executable, args) => {
+      calls.push(args);
+      return { stdout: '[]', stderr: '', exitCode: 0 };
+    };
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner,
+    });
+    const cwd = path.join(os.tmpdir(), `agent-hub-missing-cwd-${process.pid}`);
+    await expect(runner.send({ ...claudeSession(), cwd }, text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: `Project folder not found: ${cwd}`,
+    });
+    expect(calls).toEqual([]);
+  });
+
   it('does not pass phone text through a Windows shell shim for background Claude', async () => {
     const runner = new LocalReplyRunner({
       commands: { 'claude-code': 'claude.cmd' },
