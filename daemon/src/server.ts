@@ -60,7 +60,7 @@ export function lanUrls(port: number, networkInterfaces = os.networkInterfaces()
 }
 
 function isReplyAgent(agent: AgentSession['agent']): agent is ReplyAgent {
-  return agent === 'codex' || agent === 'claude-code' || agent === 'antigravity';
+  return agent === 'codex' || agent === 'claude-code' || agent === 'antigravity' || agent === 'devin';
 }
 
 export function createHub(
@@ -112,11 +112,14 @@ export function createHub(
     const failure = replyRunner?.failure(session.id);
     const pending = approvals.pending(session.id);
     const approval = pending[0];
+    const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
     return {
       ...session,
       ...(approval ? { approval, approvals: pending, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
       canReply: session.agent === 'devin'
-        ? Boolean(collectorForSession(session)?.sendMessage)
+        ? isLocalDevin
+          ? Boolean(replyRunner?.canReplyTo?.(session))
+          : Boolean(collectorForSession(session)?.sendMessage)
         : isReplyAgent(session.agent) && Boolean(
           replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
         ),
@@ -211,10 +214,13 @@ export function createHub(
       return reply.code(409).send({ error: 'Answer the request in this chat first.' });
     }
     const collector = collectorForSession(session);
-    const isDevinReply = session.agent === 'devin' && Boolean(collector?.sendMessage);
-    const isLocalReply = isReplyAgent(session.agent) && Boolean(
-      replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
-    );
+    const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
+    const isDevinReply = session.agent === 'devin' && !isLocalDevin && Boolean(collector?.sendMessage);
+    const isLocalReply = isReplyAgent(session.agent)
+      && (session.agent !== 'devin' || isLocalDevin)
+      && Boolean(
+        replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
+      );
     if (session.agent === 'antigravity' && replyRunner?.canReplyTo && !isLocalReply) {
       return reply.code(405).send({ error: 'Antigravity can only continue chats started with the agy CLI' });
     }

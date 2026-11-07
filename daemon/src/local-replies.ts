@@ -6,7 +6,7 @@ import path from 'node:path';
 import { agentLabels, type AgentSession } from '@agent-hub/shared';
 import { agentHome } from './config.js';
 
-export type ReplyAgent = 'codex' | 'claude-code' | 'antigravity';
+export type ReplyAgent = 'codex' | 'claude-code' | 'antigravity' | 'devin';
 
 export interface ReplyCommand {
   command: string;
@@ -14,6 +14,7 @@ export interface ReplyCommand {
   stdin?: string;
   shell: boolean;
   cwd: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface ReplyFailure {
@@ -114,10 +115,18 @@ export function warnLocalReplyFailure(agent: string, sessionId: string, message:
   console.warn(`Local reply failed: ${agent} ${sessionId}: ${message.replace(/[\r\n]+/g, ' ').slice(0, 300)}`);
 }
 
+export function devinCliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => {
+    const normalizedKey = key.toUpperCase();
+    return normalizedKey !== 'ACP_BACKEND' && !normalizedKey.startsWith('WINDSURF_');
+  }));
+}
+
 const commandNames: Record<ReplyAgent, string> = {
   codex: 'codex',
   'claude-code': 'claude',
   antigravity: 'agy',
+  devin: 'devin',
 };
 
 function quoteExecutable(executable: string): string {
@@ -154,6 +163,9 @@ export function buildReplyCommand(
   }
 
   const shell = platform === 'win32' && /\.(?:cmd|bat)$/i.test(executable);
+  if (agent === 'devin' && shell) {
+    throw new ReplyFailedError('', 'Replying to Devin Local chats needs devin.exe');
+  }
   if (shell && /["%&|<>^!\r\n]/.test(executable)) {
     throw new ReplyFailedError('', 'Unsafe CLI path');
   }
@@ -167,6 +179,16 @@ export function buildReplyCommand(
       stdin: text,
       shell,
       cwd: workingDirectory,
+    };
+  }
+
+  if (agent === 'devin') {
+    return {
+      command,
+      args: ['--respect-workspace-trust', 'false', '-r', nativeId, `--print=${text}`],
+      shell: false,
+      cwd: workingDirectory,
+      env: devinCliEnv(),
     };
   }
 
@@ -267,6 +289,9 @@ export class LocalReplyRunner implements ReplyRunner {
   }
 
   canReplyTo(session: AgentSession): boolean {
+    if (session.agent === 'devin') {
+      return session.id.startsWith('devin-local:') && this.supports('devin');
+    }
     if (session.agent !== 'antigravity') {
       return (session.agent === 'codex' || session.agent === 'claude-code')
         && this.supports(session.agent);
@@ -288,6 +313,11 @@ export class LocalReplyRunner implements ReplyRunner {
   }
 
   async send(session: AgentSession, text: string): Promise<void> {
+    if (session.agent === 'devin'
+      && session.id.startsWith('devin-local:')
+      && session.status === 'working') {
+      throw new ReplyBusyError('Devin is still working in this chat. Send again when it finishes.');
+    }
     if (this.isRunning(session.id)) throw new ReplyBusyError();
     await this.init();
     if (this.isRunning(session.id)) throw new ReplyBusyError();
@@ -330,6 +360,7 @@ export class LocalReplyRunner implements ReplyRunner {
         shell: command.shell,
         windowsHide: true,
         stdio: ['pipe', 'ignore', 'pipe'],
+        ...(command.env ? { env: command.env } : {}),
       });
     } catch (error) {
       throw new ReplyFailedError('', error instanceof Error ? error.message : String(error));

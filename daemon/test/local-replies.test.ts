@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
 import {
-  buildReplyCommand, cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError,
+  buildReplyCommand, cleanReplyError, devinCliEnv, LocalReplyRunner, ReplyBusyError, ReplyFailedError,
   warnLocalReplyFailure, type CommandRunner, type ReplyAgent,
 } from '../src/local-replies';
 
@@ -93,6 +93,39 @@ describe('buildReplyCommand', () => {
   );
 });
 
+describe('Devin Local reply command', () => {
+  it('uses print text as one argument and requires the devin.exe install', () => {
+    const command = buildReplyCommand(
+      'devin',
+      'glaze-spark',
+      '-x hi',
+      process.cwd(),
+      'C:\\Users\\Abhi\\AppData\\Local\\devin\\cli\\bin\\devin.exe',
+      'win32',
+    );
+    expect(command).toMatchObject({
+      command: 'C:\\Users\\Abhi\\AppData\\Local\\devin\\cli\\bin\\devin.exe',
+      args: ['--respect-workspace-trust', 'false', '-r', 'glaze-spark', '--print=-x hi'],
+      shell: false,
+      cwd: process.cwd(),
+    });
+    expect(command.stdin).toBeUndefined();
+    expect(command.env).toEqual(devinCliEnv());
+
+    expect(() => buildReplyCommand('devin', 'glaze-spark', text, process.cwd(), 'C:\\devin\\devin.cmd', 'win32'))
+      .toThrow('Replying to Devin Local chats needs devin.exe');
+  });
+
+  it('strips Devin Desktop environment variables while preserving other variables', () => {
+    expect(devinCliEnv({
+      PATH: 'C:\\devin\\bin',
+      ACP_BACKEND: 'windsurf',
+      WINDSURF_IDE_TYPE: 'windsurf',
+      windsurf_ext_host_pid: '1234',
+    })).toEqual({ PATH: 'C:\\devin\\bin' });
+  });
+});
+
 function fakeChild(): ChildProcess {
   return Object.assign(new EventEmitter(), {
     pid: 1234,
@@ -151,8 +184,86 @@ function claudeSession(nativeId = 'claude-session'): AgentSession {
   };
 }
 
+function devinLocalSession(status: AgentSession['status'] = 'done'): AgentSession {
+  return {
+    ...session,
+    id: 'devin-local:glaze-spark',
+    agent: 'devin',
+    nativeId: 'glaze-spark',
+    status,
+    canReply: false,
+  };
+}
+
 describe('LocalReplyRunner', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('reports Devin Local capability only for local sessions when Devin is resolved', async () => {
+    const runner = new LocalReplyRunner({
+      commands: { devin: 'devin.exe' },
+      resolve: async () => undefined,
+    });
+    await runner.init();
+
+    expect(runner.canReplyTo(devinLocalSession())).toBe(true);
+    expect(runner.canReplyTo({ ...devinLocalSession(), id: 'devin:cloud-session' })).toBe(false);
+
+    const unavailable = new LocalReplyRunner({ resolve: async () => undefined });
+    await unavailable.init();
+    expect(unavailable.canReplyTo(devinLocalSession())).toBe(false);
+  });
+
+  it('sends Devin Local replies with a sanitized environment', async () => {
+    const keys = ['ACP_BACKEND', 'WINDSURF_IDE_TYPE', 'windsurf_ext_host_pid', 'PATH'];
+    const previous = new Map(keys.map((key) => [key, process.env[key]]));
+    process.env.ACP_BACKEND = 'windsurf';
+    process.env.WINDSURF_IDE_TYPE = 'windsurf';
+    process.env.windsurf_ext_host_pid = '1234';
+    process.env.PATH = 'devin-test-path';
+    const spawnProcess = vi.fn((_executable: string, _args: string[], _options: { env?: NodeJS.ProcessEnv }) => backgroundChild('', 0));
+    const runner = new LocalReplyRunner({
+      commands: { devin: 'devin.exe' },
+      resolve: async () => undefined,
+      spawn: spawnProcess as unknown as typeof spawn,
+      startupMs: 1,
+    });
+
+    try {
+      await runner.send(devinLocalSession(), '-x hi');
+      const expectedEnv = devinCliEnv();
+      expect(spawnProcess).toHaveBeenCalledWith(
+        'devin.exe',
+        ['--respect-workspace-trust', 'false', '-r', 'glaze-spark', '--print=-x hi'],
+        expect.objectContaining({ cwd: process.cwd(), shell: false, env: expectedEnv }),
+      );
+      const spawnedEnv = spawnProcess.mock.calls[0]?.[2].env;
+      expect(spawnedEnv).toHaveProperty('PATH', 'devin-test-path');
+      expect(spawnedEnv).not.toHaveProperty('ACP_BACKEND');
+      expect(spawnedEnv).not.toHaveProperty('WINDSURF_IDE_TYPE');
+      expect(spawnedEnv).not.toHaveProperty('windsurf_ext_host_pid');
+    } finally {
+      for (const key of keys) {
+        const value = previous.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('rejects a working Devin Local session as busy without spawning', async () => {
+    const spawnProcess = vi.fn();
+    const runner = new LocalReplyRunner({
+      commands: { devin: 'devin.exe' },
+      resolve: async () => undefined,
+      spawn: spawnProcess as unknown as typeof spawn,
+    });
+
+    await expect(runner.send(devinLocalSession('working'), text)).rejects.toMatchObject({
+      name: 'ReplyBusyError',
+      message: 'Devin is still working in this chat. Send again when it finishes.',
+    });
+    expect(spawnProcess).not.toHaveBeenCalled();
+  });
 
   it('uses the existing -p reply path when the Claude session is not backgrounded', async () => {
     const calls: string[][] = [];

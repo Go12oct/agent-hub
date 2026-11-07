@@ -32,13 +32,22 @@ class FailingReplyCollector extends ReplyCollector {
   }
 }
 
+class DevinLocalReplyCollector extends FakeCollector {
+  name = 'devin-local';
+}
+
 class FakeLocalReplyRunner implements ReplyRunner {
   onChange?: (sessionId: string) => void;
   running = new Set<string>();
   failures = new Map<string, { error: string; at: string }>();
   sent: Array<{ sessionId: string; text: string }> = [];
   sendError?: Error;
-  supports(agent: ReplyAgent): boolean { return agent === 'codex'; }
+  supports(agent: ReplyAgent): boolean { return agent === 'codex' || agent === 'devin'; }
+  canReplyTo(session: AgentSession): boolean {
+    return session.agent === 'devin'
+      ? session.id.startsWith('devin-local:') && this.supports('devin')
+      : session.agent === 'codex' && this.supports('codex');
+  }
   isRunning(sessionId: string): boolean { return this.running.has(sessionId); }
   failure(sessionId: string): { error: string; at: string } | undefined { return this.failures.get(sessionId); }
   async send(session: AgentSession, text: string): Promise<void> {
@@ -64,6 +73,16 @@ function testSession(agent: AgentSession['agent'], nativeId: string): AgentSessi
   return {
     id: `${agent}:${nativeId}`, agent, nativeId, title: 'Test', status: 'working',
     canReply: agent === 'devin', updatedAt: new Date().toISOString(), machine: 'test',
+  };
+}
+
+function devinLocalSession(nativeId: string): AgentSession {
+  return {
+    ...testSession('devin', nativeId),
+    id: `devin-local:${nativeId}`,
+    cwd: process.cwd(),
+    status: 'done',
+    canReply: false,
   };
 }
 
@@ -219,15 +238,57 @@ describe('authenticated HTTP API', () => {
 
   it('sends a supported reply and returns 204', async () => {
     const collector = new ReplyCollector();
-    const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });
+    const replyRunner = new FakeLocalReplyRunner();
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
     collector.emit?.(testSession('devin', 'session-123'));
     try {
+      const sessions = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(sessions.json()).toEqual([
+        expect.objectContaining({ id: 'devin:session-123', canReply: true }),
+      ]);
       const response = await runtime.app.inject({
         method: 'POST', url: '/api/sessions/devin:session-123/messages',
         headers: { authorization: 'Bearer test-token' }, payload: { text: 'Please add a test' },
       });
       expect(response.statusCode).toBe(204);
       expect(collector.sent).toEqual([{ nativeId: 'session-123', text: 'Please add a test' }]);
+      expect(replyRunner.sent).toEqual([]);
+    } finally { await runtime.close(); }
+  });
+
+  it('presents Devin Local reply capability and routes replies through the local runner', async () => {
+    const collector = new DevinLocalReplyCollector();
+    const replyRunner = new FakeLocalReplyRunner();
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.(devinLocalSession('glaze-spark'));
+    try {
+      const headers = { authorization: 'Bearer test-token' };
+      const sessions = await runtime.app.inject({ url: '/api/sessions', headers });
+      expect(sessions.json()).toEqual([
+        expect.objectContaining({ id: 'devin-local:glaze-spark', canReply: true }),
+      ]);
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${encodeURIComponent('devin-local:glaze-spark')}/messages`,
+        headers,
+        payload: { text: 'Please add a test' },
+      });
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toEqual({ ok: true });
+      expect(replyRunner.sent).toEqual([
+        { sessionId: 'devin-local:glaze-spark', text: 'Please add a test' },
+      ]);
     } finally { await runtime.close(); }
   });
 
