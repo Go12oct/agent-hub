@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { Capacitor } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 import { agentLabels, type AgentKind, type AgentSession, type PendingApproval, type SessionMessage, sessionOrder } from '@agent-hub/shared';
-import { localNotificationId } from '../local-notifications';
+import { liveNotificationIds, localNotificationId } from '../local-notifications';
 import {
   candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
   type PairingDetails,
@@ -114,6 +114,18 @@ export function AgentHub() {
     } catch {}
   }, []);
 
+  const syncDeliveredNotifications = useCallback(async (sessions: AgentSession[]) => {
+    if (!Capacitor.isNativePlatform()) return;
+    try {
+      const { LocalNotifications } = await import('@capacitor/local-notifications');
+      const { notifications } = await LocalNotifications.getDeliveredNotifications();
+      const liveIds = liveNotificationIds(sessions);
+      await clearLocalNotifications(notifications
+        .filter(({ id }) => !liveIds.has(id))
+        .map(({ id }) => id));
+    } catch {}
+  }, [clearLocalNotifications]);
+
   const openSession = useCallback((sessionId: string) => {
     setSelectedId(sessionId);
     void clearLocalNotifications([
@@ -163,13 +175,15 @@ export function AgentHub() {
     try {
       const response = await fetch(`${url}/api/sessions`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
       if (!response.ok) throw new Error('Could not reach Agent Hub');
-      setSessions(await response.json() as AgentSession[]);
+      const fetchedSessions = await response.json() as AgentSession[];
+      setSessions(fetchedSessions);
       setConnection('connected');
+      void syncDeliveredNotifications(fetchedSessions);
     } catch {
       setConnection('offline');
       void failover();
     }
-  }, [url, token, failover]);
+  }, [url, token, failover, syncDeliveredNotifications]);
 
   useEffect(() => {
     if (!url || !token) return;
@@ -185,6 +199,7 @@ export function AgentHub() {
       });
       setSessions(snapshot);
       setConnection('connected');
+      void syncDeliveredNotifications(snapshot);
     });
     source.addEventListener('upsert', (event) => {
       if (!alive) return;
@@ -244,7 +259,7 @@ export function AgentHub() {
     const poll = setInterval(() => void refresh(), 15_000);
     void refresh();
     return () => { alive = false; source.close(); clearInterval(poll); };
-  }, [url, token, refresh, failover, learnUrls, clearLocalNotifications]);
+  }, [url, token, refresh, failover, learnUrls, clearLocalNotifications, syncDeliveredNotifications]);
 
   const backState = useRef({ selectedId, settingsOpen, searchOpen });
   backState.current = { selectedId, settingsOpen, searchOpen };
@@ -270,6 +285,16 @@ export function AgentHub() {
     }).catch(() => {});
     return () => remove?.();
   }, [openSession]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let remove: (() => void) | undefined;
+    void import('@capacitor/app').then(async ({ App }) => {
+      const handle = await App.addListener('resume', () => { void refresh(); });
+      remove = () => { void handle.remove(); };
+    }).catch(() => {});
+    return () => remove?.();
+  }, [refresh]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
