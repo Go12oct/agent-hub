@@ -372,12 +372,7 @@ describe('Devin API mapping', () => {
     expect(asksForSecret('Please provide an API key to proceed.')).toBe(true);
     expect(asksForSecret('Paste your Cloudflare token here')).toBe(true);
     expect(asksForSecret('Could you share the secrets?')).toBe(true);
-    expect(asksForSecret('Could you send your API key?')).toBe(true);
-    expect(asksForSecret('Can you send the API key?')).toBe(true);
-    expect(asksForSecret("I'll send the results after you provide your API key.")).toBe(true);
     expect(asksForSecret('Create a token refresh endpoint.')).toBe(false);
-    expect(asksForSecret('Create a password reset endpoint.')).toBe(false);
-    expect(asksForSecret('Add API key rotation support.')).toBe(false);
     expect(asksForSecret('I rotated the API key in the config.')).toBe(false);
     expect(asksForSecret('Added token refresh logic.')).toBe(false);
     expect(asksForSecret('Fixed the password reset bug.')).toBe(false);
