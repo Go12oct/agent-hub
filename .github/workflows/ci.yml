@@ -28,8 +28,10 @@ jobs:
         run: node daemon/scripts/build-sea.mjs
         working-directory: .
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: agent-hub-daemon-${{ runner.os }}
+          retention-days: 3
           path: |
             daemon/dist/agent-hub.cjs
             daemon/dist/agent-hub.exe
@@ -58,6 +60,8 @@ jobs:
       - run: ./gradlew assembleDebug
         working-directory: android
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: agent-hub-android-debug
+          retention-days: 3
           path: android/app/build/outputs/apk/debug/app-debug.apk

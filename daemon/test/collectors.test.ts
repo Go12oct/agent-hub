@@ -358,7 +358,9 @@ describe('Antigravity transcript parser', () => {
 describe('Devin API mapping', () => {
   it('maps the documented status categories', () => {
     expect(mapDevinStatus('working')).toBe('working');
-    expect(mapDevinStatus('blocked')).toBe('needs_input');
+    expect(mapDevinStatus('blocked')).toBe('done');
+    expect(mapDevinStatus('awaiting_input')).toBe('done');
+    expect(mapDevinStatus('waiting_for_user')).toBe('done');
     expect(mapDevinStatus('finished')).toBe('done');
     expect(mapDevinStatus('suspend_requested')).toBe('idle');
     expect(mapDevinStatus('error')).toBe('error');
@@ -371,7 +373,8 @@ describe('Devin API mapping', () => {
     collector.start((session) => emitted.push(session));
     await new Promise((resolve) => setTimeout(resolve, 5));
     collector.stop();
-    expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'needs_input', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
+    expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'done', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
+    expect(emitted[0].lastMessage).toBeUndefined();
   });
 
   it('maps message types and invalidates cached messages when updated_at changes', async () => {
@@ -458,7 +461,8 @@ describe('Devin API mapping', () => {
     collector.start((session) => emitted.push(session));
     try {
       await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(emitted[0]).toMatchObject({ lastMessage: 'Waiting for your input' });
+      expect(emitted[0].status).toBe('done');
+      expect(emitted[0].lastMessage).toBeUndefined();
       await collector.getMessages('preview', 30);
       expect(emitted.at(-1)).toMatchObject({ lastMessage: 'Run tests', lastRole: 'user' });
       await collector.refresh();

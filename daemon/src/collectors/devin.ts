@@ -28,7 +28,7 @@ interface CachedDevinMessages {
 export function mapDevinStatus(value: unknown): SessionStatus {
   switch (String(value || '').toLowerCase()) {
     case 'working': case 'running': return 'working';
-    case 'blocked': case 'awaiting_input': case 'waiting_for_user': return 'needs_input';
+    case 'blocked': case 'awaiting_input': case 'waiting_for_user': return 'done';
     case 'finished': case 'completed': return 'done';
     case 'expired': case 'suspended': case 'stopped':
     case 'suspend_requested': case 'suspend_requested_frontend':
@@ -115,7 +115,7 @@ export class DevinCollector implements Collector {
           status,
           ...(lastMessage
             ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
-            : status === 'needs_input' ? { lastMessage: 'Waiting for your input' } : {}),
+            : {}),
           canReply: true,
           updatedAt, ...(row.created_at ? { startedAt: String(row.created_at) } : {}),
           url: `https://app.devin.ai/sessions/${encodeURIComponent(urlId)}`, machine: os.hostname(),
