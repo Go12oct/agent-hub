@@ -113,7 +113,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   }
   const error = lastErrorIndex > lastActivityIndex;
   const updatedAt = isoOrNow(timestamp);
-  const approvalTimestamp = Date.parse(String(timestamp || ''));
+  const approvalTimestamp = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp || ''));
   const approvalRequestedAt = Number.isFinite(approvalTimestamp) ? new Date(approvalTimestamp).toISOString() : undefined;
   const recentApproval = approvalRequested && approvalRequestedAt !== undefined
     && approvalTimestamp <= now && now - approvalTimestamp <= 30 * 60_000;

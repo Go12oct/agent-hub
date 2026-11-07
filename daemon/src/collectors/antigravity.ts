@@ -216,7 +216,8 @@ export class AntigravityCollector extends WatchedCollector {
     return (this.messagesByFile.get(file) || []).slice(-limit);
   }
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
-    const file = this.transcriptById.get(nativeId);
-    return file ? this.messages(file, limit) : [];
+    const file = this.transcriptById.get(nativeId) || this.fileById.get(nativeId);
+    if (!file) return [];
+    return this.messages(file, limit);
   }
 }

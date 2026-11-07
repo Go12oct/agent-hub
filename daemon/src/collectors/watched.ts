@@ -1,7 +1,10 @@
 import { watch, type FSWatcher } from 'chokidar';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { setImmediate as yieldToEventLoop, setTimeout as delay } from 'node:timers/promises';
 import type { Stats } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { configDirectory } from '../config.js';
 import { filesModifiedAfter, inferStatus } from './files.js';
 import type { Collector, EmitSession } from './types.js';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
@@ -27,6 +30,8 @@ interface CachedFile {
   parsed: ParsedWatchedSession;
 }
 
+const PARSED_CACHE_VERSION = 1;
+
 export abstract class WatchedCollector implements Collector {
   abstract name: string;
   protected emit?: EmitSession;
@@ -39,6 +44,9 @@ export abstract class WatchedCollector implements Collector {
   private scanPromise?: Promise<void>;
   private scanPending = false;
   private stopped = false;
+  private cacheLoaded = true;
+  private cacheJson?: string;
+  private cacheLoadPromise?: Promise<void>;
 
   protected abstract roots(): string[];
   protected abstract findFiles(): Promise<string[]>;
@@ -63,6 +71,7 @@ export abstract class WatchedCollector implements Collector {
   start(emit: EmitSession): void {
     this.emit = emit;
     this.stopped = false;
+    this.cacheLoaded = false;
     const { paths, depth, ignored } = this.watchTargets();
     this.watcher = watch(paths, {
       ignoreInitial: true,
@@ -82,7 +91,15 @@ export abstract class WatchedCollector implements Collector {
       console.warn(`[${this.name}] watcher failed: ${message}`);
     });
     this.timer = setInterval(() => this.scheduleRescan(), 15_000);
-    this.scheduleRescan();
+    this.cacheLoadPromise = this.restoreCache()
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[${this.name}] cache load failed: ${message}`);
+      })
+      .finally(() => {
+        this.cacheLoaded = true;
+        if (!this.stopped) this.scheduleRescan();
+      });
   }
 
   async stop(): Promise<void> {
@@ -90,6 +107,7 @@ export abstract class WatchedCollector implements Collector {
     if (this.timer) clearInterval(this.timer);
     if (this.rescanTimer) clearTimeout(this.rescanTimer);
     await this.watcher?.close();
+    await this.cacheLoadPromise;
     await this.scanPromise;
   }
 
@@ -147,6 +165,12 @@ export abstract class WatchedCollector implements Collector {
         this.fileById.delete(session.nativeId);
         this.emit.remove?.(id);
       }
+      try {
+        await this.persistCache();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[${this.name}] cache write failed: ${message}`);
+      }
       console.log(`[${this.name}] rescan: ${fileCount} files, ${parsedCount} parsed, ${Date.now() - startedAt} ms`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -155,7 +179,7 @@ export abstract class WatchedCollector implements Collector {
   }
 
   private scheduleRescan(): void {
-    if (!this.emit || this.stopped) return;
+    if (!this.emit || this.stopped || !this.cacheLoaded) return;
     if (this.rescanTimer) clearTimeout(this.rescanTimer);
     this.rescanTimer = setTimeout(() => {
       this.rescanTimer = undefined;
@@ -179,6 +203,78 @@ export abstract class WatchedCollector implements Collector {
         this.scanPending = false;
         void this.runRescan();
       }
+    }
+  }
+
+  private cacheFile(): string {
+    return path.join(configDirectory(), 'cache', `${this.name}.json`);
+  }
+
+  private async restoreCache(): Promise<void> {
+    const file = this.cacheFile();
+    let raw: string;
+    try {
+      raw = await readFile(file, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+
+    let cache: any;
+    try {
+      cache = JSON.parse(raw);
+    } catch {
+      await rm(file, { force: true }).catch(() => {});
+      return;
+    }
+    if (cache?.version !== PARSED_CACHE_VERSION || !cache.files || typeof cache.files !== 'object' || Array.isArray(cache.files)) {
+      await rm(file, { force: true }).catch(() => {});
+      return;
+    }
+
+    const restored: Array<[string, CachedFile]> = [];
+    try {
+      for (const [source, entry] of Object.entries(cache.files)) {
+        const cached = entry as { key?: unknown; parsed?: ParsedWatchedSession };
+        if (typeof cached.key !== 'string' || !cached.parsed?.session
+          || typeof cached.parsed.session.id !== 'string' || typeof cached.parsed.session.nativeId !== 'string') {
+          throw new Error('invalid parsed cache entry');
+        }
+        const mtimeMs = Number.parseFloat(cached.key);
+        if (!Number.isFinite(mtimeMs)) throw new Error('invalid parsed cache key');
+        restored.push([source, { key: cached.key, mtimeMs, parsed: cached.parsed }]);
+      }
+    } catch {
+      await rm(file, { force: true }).catch(() => {});
+      return;
+    }
+
+    this.parsedFiles.clear();
+    this.cacheJson = JSON.stringify(cache);
+    for (const [source, cached] of restored) {
+      this.parsedFiles.set(source, cached);
+      const session = this.refreshSession(cached.parsed, cached.mtimeMs, Date.now());
+      this.sessions.set(session.id, session);
+      this.fileById.set(session.nativeId, source);
+      this.emit?.(session);
+    }
+  }
+
+  private async persistCache(): Promise<void> {
+    const files: Record<string, { key: string; parsed: ParsedWatchedSession }> = {};
+    for (const [file, cached] of this.parsedFiles) files[file] = { key: cached.key, parsed: cached.parsed };
+    const serialized = JSON.stringify({ version: PARSED_CACHE_VERSION, files });
+    if (serialized === this.cacheJson) return;
+
+    const cacheFile = this.cacheFile();
+    const temporaryFile = `${cacheFile}.${randomUUID()}.tmp`;
+    await mkdir(path.dirname(cacheFile), { recursive: true });
+    try {
+      await writeFile(temporaryFile, serialized, { mode: 0o600 });
+      await rename(temporaryFile, cacheFile);
+      this.cacheJson = serialized;
+    } finally {
+      await rm(temporaryFile, { force: true }).catch(() => {});
     }
   }
 }

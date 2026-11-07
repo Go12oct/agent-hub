@@ -167,7 +167,11 @@ export class ClaudeCollector extends WatchedCollector {
     if (!status) return;
     const now = this.now();
     const failureMessage = formatErrorMessage(errorText(payload.error) || payload.message);
-    this.hookOverrides.set(payload.session_id, { status, at: now, message: payload.message });
+    this.hookOverrides.set(payload.session_id, {
+      status,
+      at: now,
+      message: status === 'error' ? failureMessage : payload.message,
+    });
     const existing = this.sessions.get(`claude-code:${payload.session_id}`);
     if (existing) {
       const updated = {
@@ -230,12 +234,23 @@ export class ClaudeCollector extends WatchedCollector {
       this.hookOverrides.delete(session.nativeId);
       return session;
     }
-    return { ...session, status: override, updatedAt: new Date(Math.max(Date.parse(session.updatedAt), hook.at)).toISOString() };
+    return {
+      ...session,
+      status: override,
+      ...(hook.status === 'error' ? { lastMessage: hook.message } : {}),
+      updatedAt: new Date(Math.max(Date.parse(session.updatedAt), hook.at)).toISOString(),
+    };
   }
   private messagesById = new Map<string, SessionMessage[]>();
   protected async messages(file: string, limit: number): Promise<SessionMessage[]> {
     const id = path.basename(file, '.jsonl');
     if (!this.messagesById.has(id)) await this.parse(file);
     return (this.messagesById.get(id) || []).slice(-limit);
+  }
+  async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
+    const file = this.fileById.get(nativeId);
+    if (!file) return [];
+    if (!this.messagesById.has(nativeId)) await this.parse(file);
+    return (this.messagesById.get(nativeId) || []).slice(-limit);
   }
 }

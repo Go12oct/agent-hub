@@ -11,17 +11,18 @@ import { mapDevinStatus, parseDevinMessages, DevinCollector } from '../src/colle
 import { CodexCloudCollector } from '../src/collectors/codex-cloud';
 import { WatchedCollector, type ParsedWatchedSession } from '../src/collectors/watched';
 import type { EmitSession } from '../src/collectors/types';
+import { NtfyNotifier } from '../src/notifications';
 
 const fixtures = path.resolve('daemon/test/fixtures/home');
 
 class CachedFileCollector extends WatchedCollector {
   name = 'cached-test';
   refreshCount = 0;
-  constructor(private root: string, private file: string) { super(); }
+  constructor(private root: string, private file: string, private parsedUpdatedAt?: string) { super(); }
   protected roots(): string[] { return [this.root]; }
   protected async findFiles(): Promise<string[]> { return [this.file]; }
   async parse(): Promise<ParsedWatchedSession> {
-    const updatedAt = new Date().toISOString();
+    const updatedAt = this.parsedUpdatedAt ?? new Date().toISOString();
     return {
       session: { id: 'cached-test:fixture', agent: 'codex', nativeId: 'fixture', title: 'Fixture', status: 'working', canReply: false, updatedAt, machine: 'test' },
       statusFacts: { updatedAt, lastRole: 'assistant', completed: true, errored: false },
@@ -56,9 +57,16 @@ async function fixtureLines(file: string): Promise<Record<string, any>[]> {
   return (await readFile(path.join(fixtures, file), 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
 }
 
-async function collectFixture(collector: CodexCollector | ClaudeCollector | AntigravityCollector, agent: string): Promise<AgentSession> {
+async function collectFixture(
+  collector: CodexCollector | ClaudeCollector | AntigravityCollector,
+  agent: string,
+  configDir?: string,
+): Promise<AgentSession> {
   const previousHome = process.env.AGENT_HUB_HOME;
+  const previousConfigDir = process.env.AGENT_HUB_CONFIG_DIR;
+  const temporaryConfigDir = configDir ?? await mkdtemp(path.join(os.tmpdir(), 'agent-hub-fixture-config-'));
   process.env.AGENT_HUB_HOME = fixtures;
+  process.env.AGENT_HUB_CONFIG_DIR = temporaryConfigDir;
   let timeout: NodeJS.Timeout | undefined;
   try {
     const session = await new Promise<AgentSession>((resolve, reject) => {
@@ -73,6 +81,9 @@ async function collectFixture(collector: CodexCollector | ClaudeCollector | Anti
     await collector.stop();
     if (previousHome === undefined) delete process.env.AGENT_HUB_HOME;
     else process.env.AGENT_HUB_HOME = previousHome;
+    if (previousConfigDir === undefined) delete process.env.AGENT_HUB_CONFIG_DIR;
+    else process.env.AGENT_HUB_CONFIG_DIR = previousConfigDir;
+    if (configDir === undefined) await rm(temporaryConfigDir, { recursive: true, force: true });
   }
 }
 
@@ -163,7 +174,9 @@ describe('Codex transcript parser', () => {
     ], 'approval-unknown-time', now);
     expect(missingTimestamp.session.status).not.toBe('needs_input');
   });
+});
 
+describe('Claude hook override expiry', () => {
   it('expires Claude needs_input hook overrides after the hold plus 60 seconds', async () => {
     class TestClaudeCollector extends ClaudeCollector {
       refresh(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
@@ -191,6 +204,7 @@ describe('Codex transcript parser', () => {
     expect(collector.retains(refreshed)).toBe(false);
     await collector.stop();
   });
+});
 
 describe('fixture-backed collector discovery', () => {
   it('scans the configured home for Codex, Claude, and Antigravity sessions', async () => {
@@ -200,6 +214,28 @@ describe('fixture-backed collector discovery', () => {
     expect(codex.title).toBe('Fix the live feed sorting');
     expect(claude.title).toBe('Review the latest changes');
     expect(antigravity.title).toBe('Implement the settings panel');
+  });
+
+  it('reloads lazy messages from disk after restoring parsed session caches', async () => {
+    const configDir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-message-cache-'));
+    try {
+      const collectors = [
+        { agent: 'codex', create: () => new CodexCollector() },
+        { agent: 'claude-code', create: () => new ClaudeCollector() },
+        { agent: 'antigravity', create: () => new AntigravityCollector() },
+      ];
+      for (const { agent, create } of collectors) {
+        await collectFixture(create(), agent, configDir);
+        const restoredCollector = create();
+        const parseSpy = vi.spyOn(restoredCollector as any, 'parse');
+        const restoredSession = await collectFixture(restoredCollector, agent, configDir);
+        expect(parseSpy).not.toHaveBeenCalled();
+        expect(await restoredCollector.getMessages(restoredSession.nativeId, 30)).not.toHaveLength(0);
+        if (agent !== 'codex') expect(parseSpy).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      await rm(configDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -303,6 +339,8 @@ describe('watched collector cache', () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-watched-'));
     const file = path.join(home, 'session.jsonl');
     await writeFile(file, '{"fixture":true}\n');
+    const previousConfigDir = process.env.AGENT_HUB_CONFIG_DIR;
+    process.env.AGENT_HUB_CONFIG_DIR = path.join(home, 'config');
     const collector = new CachedFileCollector(home, file);
     const parseSpy = vi.spyOn(collector, 'parse');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -323,6 +361,53 @@ describe('watched collector cache', () => {
       warnSpy.mockRestore();
       await collector.stop();
       await rm(home, { recursive: true, force: true });
+      if (previousConfigDir === undefined) delete process.env.AGENT_HUB_CONFIG_DIR;
+      else process.env.AGENT_HUB_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it('restores sessions before parsing, reparses changed files, and suppresses old-session notifications', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-watched-restart-'));
+    const file = path.join(home, 'session.jsonl');
+    await writeFile(file, '{"fixture":true}\n');
+    const previousConfigDir = process.env.AGENT_HUB_CONFIG_DIR;
+    process.env.AGENT_HUB_CONFIG_DIR = path.join(home, 'config');
+    const oldUpdatedAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    const first = new CachedFileCollector(home, file, oldUpdatedAt);
+    const second = new CachedFileCollector(home, file, oldUpdatedAt);
+    const parseSpy = vi.spyOn(second, 'parse');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    const notifier = new NtfyNotifier({ topic: 'cache-test' }, fetchMock as unknown as typeof fetch);
+    const notificationPromises: Promise<void>[] = [];
+    const emitted: AgentSession[] = [];
+    try {
+      await first.scan(() => {});
+      await first.stop();
+      const cache = JSON.parse(await readFile(path.join(home, 'config', 'cache', 'cached-test.json'), 'utf8'));
+      expect(cache.version).toBe(1);
+
+      second.start((session) => {
+        emitted.push(session);
+        notificationPromises.push(notifier.update(session));
+      });
+      await vi.waitFor(() => expect(emitted).toHaveLength(1));
+      expect(emitted[0]?.status).toBe('done');
+      expect(parseSpy).not.toHaveBeenCalled();
+      await Promise.all(notificationPromises);
+      expect(fetchMock).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/^\[cached-test\] rescan: 1 files, 0 parsed,/)));
+
+      await writeFile(file, '{"fixture":false}\n');
+      await second.scan((session) => emitted.push(session));
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      logSpy.mockRestore();
+      await first.stop();
+      await second.stop();
+      await rm(home, { recursive: true, force: true });
+      if (previousConfigDir === undefined) delete process.env.AGENT_HUB_CONFIG_DIR;
+      else process.env.AGENT_HUB_CONFIG_DIR = previousConfigDir;
     }
   });
 });
@@ -345,20 +430,19 @@ describe('Claude Code hooks', () => {
     expect(claudeHookOverride(100, 'needs_input', 100, 460_001, 300_000)).toBeUndefined();
     const collector = new ClaudeCollector();
     const emitted: any[] = [];
-    collector.start((session) => emitted.push(session));
-    await collector.applyHook({ session_id: 'hook-fixture', hook_event_name: 'Notification', cwd: '/tmp/project', message: 'Permission needed' });
+    const emit = (session: AgentSession) => emitted.push(session);
+    await collector.applyHook({ session_id: 'hook-fixture', hook_event_name: 'Notification', cwd: '/tmp/project', message: 'Permission needed' }, emit);
     expect(emitted.at(-1).status).toBe('needs_input');
     expect(emitted.at(-1).lastMessage).toBe('Permission needed');
     await collector.applyHook({
       session_id: 'hook-fixture', hook_event_name: 'StopFailure', cwd: '/tmp/project', error: 'The API request failed',
-    });
+    }, emit);
     expect(emitted.at(-1).status).toBe('error');
     expect(emitted.at(-1).lastMessage).toBe('Error: The API request failed');
     await collector.applyHook({
       session_id: 'hook-fixture', hook_event_name: 'StopFailure', cwd: '/tmp/project', message: 'Process exited unexpectedly',
-    });
+    }, emit);
     expect(emitted.at(-1).lastMessage).toBe('Error: Process exited unexpectedly');
-    await collector.stop();
   });
 
   it('parses transcript title, cwd, branch, status, and messages', async () => {
