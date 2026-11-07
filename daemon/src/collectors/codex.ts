@@ -75,12 +75,16 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   let lastErrorMessage: string | undefined;
   let lastActivityIndex = -1;
   let approvalRequested = false;
+  let approvalTimestamp: number | string | undefined;
   let timestamp = meta.timestamp;
   for (let index = 0; index < records.length; index++) {
     const record = records[index]!;
     timestamp = record.timestamp || timestamp;
     const payload = record.payload || {};
-    if (record.type === 'response_item') approvalRequested = false;
+    if (record.type === 'response_item') {
+      approvalRequested = false;
+      approvalTimestamp = undefined;
+    }
     if (record.type === 'response_item' && payload.type === 'message') {
       const role = payload.role;
       if (role === 'user' || role === 'assistant') lastActivityIndex = index;
@@ -104,6 +108,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     if (record.type === 'event_msg') {
       const kind = String(payload.type || '');
       approvalRequested = /approval_request$/.test(kind);
+      approvalTimestamp = approvalRequested ? record.timestamp || timestamp : undefined;
       const text = String(payload.message || payload.text || payload.content || '');
       if (kind === 'user_message' || kind === 'agent_message') {
         const role = kind === 'user_message' ? 'user' : 'assistant';
@@ -132,10 +137,14 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   }
   const error = lastErrorIndex > lastActivityIndex;
   const updatedAt = isoOrNow(timestamp);
-  const approvalTimestamp = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp || ''));
-  const approvalRequestedAt = Number.isFinite(approvalTimestamp) ? new Date(approvalTimestamp).toISOString() : undefined;
+  const approvalTimestampMs = typeof approvalTimestamp === 'number'
+    ? approvalTimestamp
+    : Date.parse(String(approvalTimestamp || ''));
+  const approvalRequestedAt = Number.isFinite(approvalTimestampMs)
+    ? new Date(approvalTimestampMs).toISOString()
+    : undefined;
   const recentApproval = approvalRequested && approvalRequestedAt !== undefined
-    && approvalTimestamp <= now && now - approvalTimestamp <= 30 * 60_000;
+    && approvalTimestampMs <= now && now - approvalTimestampMs <= 30 * 60_000;
   const explicitStatus: SessionStatus | undefined = recentApproval ? 'needs_input' : undefined;
   const statusFacts = {
     updatedAt, lastRole, completed, errored: error, explicitStatus,

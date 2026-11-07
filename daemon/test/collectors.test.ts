@@ -179,6 +179,16 @@ describe('Codex transcript parser', () => {
       { type: 'event_msg', payload: { type: 'exec_approval_request' } },
     ], 'approval-unknown-time', now);
     expect(missingTimestamp.session.status).not.toBe('needs_input');
+
+    const approvalAt = now - 30 * 60_000 - 5_000;
+    const contextAt = approvalAt + 10_000;
+    const withLaterContext = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'approval-context' } },
+      { type: 'event_msg', timestamp: new Date(approvalAt).toISOString(), payload: { type: 'exec_approval_request' } },
+      { type: 'turn_context', timestamp: new Date(contextAt).toISOString(), payload: {} },
+    ], 'approval-context', now);
+    expect(withLaterContext.statusFacts.approvalRequestedAt).toBe(new Date(approvalAt).toISOString());
+    expect(withLaterContext.session.status).not.toBe('needs_input');
   });
 });
 
@@ -251,8 +261,9 @@ describe('Codex collector hooks', () => {
     await mkdir(sessionsDir, { recursive: true });
     const file = path.join(sessionsDir, 'rollout-cleared-approval.jsonl');
     const base = Date.now();
-    let now = base - 10_000;
-    const timestamp = new Date(base - 20_000).toISOString();
+    const approvalAt = base - 60_000;
+    let now = approvalAt + 2_000;
+    const timestamp = new Date(approvalAt).toISOString();
     const originalRecords = [
       { type: 'session_meta', payload: { meta: { id: 'codex-cleared-approval', cwd: '/tmp/project', timestamp } } },
       { type: 'event_msg', timestamp, payload: { type: 'exec_approval_request' } },
@@ -277,13 +288,13 @@ describe('Codex collector hooks', () => {
       await collector.clearNeedsInput('codex:codex-cleared-approval', emit);
       expect(collector.getSession('codex:codex-cleared-approval')?.status).not.toBe('needs_input');
 
-      now = base;
-      const laterTimestamp = new Date(base - 5_000).toISOString();
-      await writeFile(file, `${originalRecords.map((record) => JSON.stringify(record)).join('\n')}\n${JSON.stringify({
-        type: 'event_msg',
-        timestamp: laterTimestamp,
-        payload: { type: 'exec_approval_request' },
-      })}\n`);
+      const laterContext = { type: 'turn_context', timestamp: new Date(approvalAt + 5_000).toISOString(), payload: {} };
+      await writeFile(file, `${[...originalRecords, laterContext].map((record) => JSON.stringify(record)).join('\n')}\n`);
+      await collector.rescanForTest();
+      expect(collector.getSession('codex:codex-cleared-approval')?.status).not.toBe('needs_input');
+
+      const laterApproval = { type: 'event_msg', timestamp: new Date(approvalAt + 10_000).toISOString(), payload: { type: 'exec_approval_request' } };
+      await writeFile(file, `${[...originalRecords, laterContext, laterApproval].map((record) => JSON.stringify(record)).join('\n')}\n`);
       await collector.rescanForTest();
       expect(collector.getSession('codex:codex-cleared-approval')?.status).toBe('needs_input');
     } finally {
