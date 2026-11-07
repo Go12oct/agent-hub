@@ -344,6 +344,18 @@ export function AgentHub() {
   }, [sessions]);
   const tabs = agentOrder.filter((agent) => agent !== 'codex-cloud' || counts.has(agent));
 
+  useEffect(() => {
+    const screen = document.querySelector<HTMLElement>('.screen');
+    const background = screen ? getComputedStyle(screen).getPropertyValue('--screen-bg').trim() : '';
+    document.body.style.backgroundColor = background;
+    document.documentElement.style.backgroundColor = background;
+  }, [pairLink, pairing, ready, selectedAgent, selectedId, selectedSession]);
+
+  useEffect(() => () => {
+    document.body.style.backgroundColor = '';
+    document.documentElement.style.backgroundColor = '';
+  }, []);
+
   async function disconnect() {
     if (Capacitor.isNativePlatform()) await Preferences.remove({ key: 'pairing' });
     else localStorage.removeItem('agent-hub-pairing');
@@ -389,7 +401,7 @@ export function AgentHub() {
   }
 
   return (
-    <main className="screen">
+    <main className="screen" data-agent={selectedAgent}>
       <header className="app-bar">
         {searchOpen ? (
           <div className="search-field">
@@ -569,7 +581,6 @@ function DeckCard({
     <section
       className={`deck-card needs_input${dragging ? ' dragging' : ''}${leaving ? ` leaving ${leaving}` : ''}`}
       data-depth={Math.min(depth, 3)}
-      data-agent={item.session.agent}
       style={{
         zIndex: 10 - depth,
         ...(dragging ? { transform: `translateX(${dragX}px) rotate(${dragX / 24}deg)` } : {}),
@@ -643,7 +654,7 @@ function AgentTile({
   const steps = messages.length >= 100 ? '100+' : messages.filter((message) => message.role === 'tool').length;
 
   return (
-    <button className={`agent-tile ${session.status}`} data-agent={session.agent} onClick={onOpen}>
+    <button className={`agent-tile ${session.status}`} onClick={onOpen}>
       <span className="tile-top">
         <Avatar agent={session.agent} />
         <span className="tile-agent"><strong className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
@@ -837,7 +848,7 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
   const preview = session.lastMessage ? previewText(session.lastMessage) : '';
   const request = session.status === 'needs_input' ? (session.approvals ?? (session.approval ? [session.approval] : []))[0] : undefined;
   return (
-    <button className={`row ${session.status}`} data-agent={session.agent} onClick={onOpen}>
+    <button className={`row ${session.status}`} onClick={onOpen}>
       <Avatar agent={session.agent} />
       <span className="row-body">
         <span className="row-top">
