@@ -796,6 +796,11 @@ describe('Antigravity transcript parser', () => {
       { type: 'user', role: 'user', text: '<USER_REQUEST>\nKeep this request\n</USER_REQUEST>\n<ADDITIONAL_METADATA>' },
     ], 'anti-open-wrapper', '2025-01-02T12:00:05.000Z', Date.parse('2025-01-02T12:00:05.000Z'));
     expect(openedWrapper.messages[0]?.text).toBe('Keep this request');
+
+    const inlineWrapper = parseAntigravityRecords([
+      { type: 'user', role: 'user', text: '<USER_REQUEST>Fix tests</USER_REQUEST><ADDITIONAL_METADATA>Injected context' },
+    ], 'anti-inline-wrapper', '2025-01-02T12:00:05.000Z', Date.parse('2025-01-02T12:00:05.000Z'));
+    expect(inlineWrapper.messages[0]?.text).toBe('Fix tests');
   });
 
   it('extracts user prompt and conversation metadata from transcript records', async () => {

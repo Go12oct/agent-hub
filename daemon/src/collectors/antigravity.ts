@@ -21,8 +21,8 @@ function normalizeWatchPath(value: string): string {
 }
 
 function cleanUserText(text: string): string {
-  const withoutOpeningTag = text.replace(/^<USER_REQUEST>\r?\n/i, '');
-  const closingTag = withoutOpeningTag.indexOf('\n</USER_REQUEST>');
+  const withoutOpeningTag = text.replace(/^\s*<USER_REQUEST>\s*/i, '');
+  const closingTag = withoutOpeningTag.search(/<\/USER_REQUEST>/i);
   return (closingTag < 0 ? withoutOpeningTag : withoutOpeningTag.slice(0, closingTag)).trim();
 }
 
