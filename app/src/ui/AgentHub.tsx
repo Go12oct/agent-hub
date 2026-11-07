@@ -207,7 +207,7 @@ export function AgentHub() {
     let remove: (() => void) | undefined;
     void import('@capacitor/app').then(async ({ App }) => {
       const openLink = (link?: string | null) => {
-        if (link && parsePairingLink(link)) { setPairLink(link); return; }
+        if (link && parsePairingLink(link)) { setPairLink(link); setPairing(undefined); setSelectedId(undefined); return; }
         const id = sessionIdFromLink(link);
         if (id) { setSettingsOpen(false); setSearchOpen(false); setSelectedId(id); }
       };
