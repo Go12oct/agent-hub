@@ -117,22 +117,70 @@ describe('Codex transcript parser', () => {
     ]).session.status).toBe('done');
   });
 
-  it('marks a trailing approval request as needing input only until another event arrives', () => {
+  it('marks only a recent trailing event_msg approval request as needing input', () => {
+    const now = Date.now();
     const pending = parseCodexRecords([
       { type: 'session_meta', payload: { id: 'approval' } },
-      { type: 'event_msg', payload: { type: 'exec_approval_request' } },
-    ], 'approval');
+      { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'exec_approval_request' } },
+    ], 'approval', now);
     expect(pending.session.status).toBe('needs_input');
     expect(pending.session.lastMessage).toBe('Waiting for approval');
 
     const resolved = parseCodexRecords([
       { type: 'session_meta', payload: { id: 'approval-resolved' } },
-      { type: 'event_msg', payload: { type: 'apply_patch_approval_request' } },
-      { type: 'response_item', payload: { type: 'function_call', name: 'apply_patch' } },
-    ], 'approval-resolved');
-    expect(resolved.session.status).not.toBe('needs_input');
+      { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'apply_patch_approval_request' } },
+      { type: 'response_item', timestamp: new Date(now).toISOString(), payload: { type: 'function_call', name: 'apply_patch' } },
+    ], 'approval-resolved', now);
+    expect(resolved.session.status).toBe('needs_input');
+
+    const superseded = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'approval-superseded' } },
+      { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'apply_patch_approval_request' } },
+      { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'agent_message', message: 'Continuing' } },
+    ], 'approval-superseded', now);
+    expect(superseded.session.status).not.toBe('needs_input');
+
+    const staleAt = now - 31 * 60_000;
+    const stale = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'approval-stale' } },
+      { type: 'event_msg', timestamp: new Date(staleAt).toISOString(), payload: { type: 'exec_approval_request' } },
+    ], 'approval-stale', now);
+    expect(stale.session.status).not.toBe('needs_input');
+
+    const missingTimestamp = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'approval-unknown-time' } },
+      { type: 'event_msg', payload: { type: 'exec_approval_request' } },
+    ], 'approval-unknown-time', now);
+    expect(missingTimestamp.session.status).not.toBe('needs_input');
   });
-});
+
+  it('expires Claude needs_input hook overrides after the hold plus 60 seconds', async () => {
+    class TestClaudeCollector extends ClaudeCollector {
+      refresh(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
+        return this.refreshSession(parsed, mtimeMs, now);
+      }
+      retains(session: AgentSession): boolean {
+        return this.shouldRetain(session);
+      }
+    }
+    const base = 1_700_000_000_000;
+    let now = base;
+    const collector = new TestClaudeCollector({ approvalHoldMs: 300_000, now: () => now });
+    const emitted: AgentSession[] = [];
+    await collector.applyHook({
+      session_id: 'expiring-hook',
+      hook_event_name: 'PermissionRequest',
+      cwd: '/tmp/project',
+    }, (session) => emitted.push(session));
+    expect(emitted.at(-1)?.status).toBe('needs_input');
+
+    const parsed = parseClaudeRecords([], 'expiring-hook', new Date(base).toISOString(), base);
+    now = base + 360_001;
+    const refreshed = collector.refresh({ session: parsed.session, statusFacts: parsed.statusFacts }, base, now);
+    expect(refreshed.status).not.toBe('needs_input');
+    expect(collector.retains(refreshed)).toBe(false);
+    await collector.stop();
+  });
 
 describe('fixture-backed collector discovery', () => {
   it('scans the configured home for Codex, Claude, and Antigravity sessions', async () => {
@@ -282,8 +330,9 @@ describe('Claude Code hooks', () => {
     expect(mapClaudeHook('Stop')).toBe('done');
     expect(mapClaudeHook('StopFailure')).toBe('error');
     expect(mapClaudeHook('SessionEnd')).toBe('done');
-    expect(claudeHookOverride(100, 'needs_input', 100)).toBe('needs_input');
-    expect(claudeHookOverride(101, 'needs_input', 100)).toBeUndefined();
+    expect(claudeHookOverride(100, 'needs_input', 100, 100)).toBe('needs_input');
+    expect(claudeHookOverride(101, 'needs_input', 100, 100)).toBeUndefined();
+    expect(claudeHookOverride(100, 'needs_input', 100, 460_001, 300_000)).toBeUndefined();
     const collector = new ClaudeCollector();
     const emitted: any[] = [];
     collector.start((session) => emitted.push(session));

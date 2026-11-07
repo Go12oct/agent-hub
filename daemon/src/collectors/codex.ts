@@ -35,6 +35,8 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     completed: boolean;
     errored: boolean;
     explicitStatus?: SessionStatus;
+    approvalRequested?: boolean;
+    approvalRequestedAt?: string;
   };
 } {
   const sessionMeta = records.find((record) => record.type === 'session_meta')?.payload || {};
@@ -52,7 +54,6 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   let timestamp = meta.timestamp;
   for (let index = 0; index < records.length; index++) {
     const record = records[index]!;
-    if (record.type !== 'event_msg') approvalRequested = false;
     timestamp = record.timestamp || timestamp;
     const payload = record.payload || {};
     if (record.type === 'response_item' && payload.type === 'message') {
@@ -103,8 +104,15 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   }
   const error = lastErrorIndex > lastActivityIndex;
   const updatedAt = isoOrNow(timestamp);
-  const explicitStatus: SessionStatus | undefined = approvalRequested ? 'needs_input' : undefined;
-  const statusFacts = { updatedAt, lastRole, completed, errored: error, explicitStatus };
+  const approvalTimestamp = Date.parse(String(timestamp || ''));
+  const approvalRequestedAt = Number.isFinite(approvalTimestamp) ? new Date(approvalTimestamp).toISOString() : undefined;
+  const recentApproval = approvalRequested && approvalRequestedAt !== undefined
+    && approvalTimestamp <= now && now - approvalTimestamp <= 30 * 60_000;
+  const explicitStatus: SessionStatus | undefined = recentApproval ? 'needs_input' : undefined;
+  const statusFacts = {
+    updatedAt, lastRole, completed, errored: error, explicitStatus,
+    ...(approvalRequested ? { approvalRequested: true, ...(approvalRequestedAt ? { approvalRequestedAt } : {}) } : {}),
+  };
   return {
     session: buildSession({
       agent: 'codex', nativeId, title, cwd,
@@ -112,7 +120,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
         : typeof meta.git_branch === 'string' ? meta.git_branch : undefined,
       updatedAt, startedAt: meta.timestamp,
       status: explicitStatus || inferStatus(updatedAt, lastRole, completed, error, now),
-      lastMessage: explicitStatus ? 'Waiting for approval' : lastMessage?.slice(-280),
+      lastMessage: explicitStatus && !lastMessage ? 'Waiting for approval' : lastMessage?.slice(-280),
       lastRole,
     }),
     messages: output,
@@ -129,6 +137,19 @@ export class CodexCollector extends WatchedCollector {
     return this.recentFiles(files, this.days);
   }
   constructor(private days = 7) { super(); }
+  protected refreshSession(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
+    const session = super.refreshSession(parsed, mtimeMs, now);
+    const facts = parsed.statusFacts;
+    if (!facts?.approvalRequested) return session;
+    const timestamp = Date.parse(facts.approvalRequestedAt || '');
+    const recent = Number.isFinite(timestamp) && timestamp <= now && now - timestamp <= 30 * 60_000;
+    if (recent) return { ...session, status: 'needs_input', lastMessage: parsed.session.lastMessage || 'Waiting for approval' };
+    return {
+      ...session,
+      status: inferStatus(facts.updatedAt, facts.lastRole, facts.completed, facts.errored, now),
+      lastMessage: parsed.session.lastMessage === 'Waiting for approval' ? undefined : parsed.session.lastMessage,
+    };
+  }
   protected async parse(file: string): Promise<ParsedWatchedSession | undefined> {
     const parsed = parseCodexRecords(await parseJsonLines(file), path.basename(file, '.jsonl'));
     return { session: parsed.session, statusFacts: parsed.statusFacts };

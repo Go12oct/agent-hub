@@ -12,6 +12,8 @@ export interface SessionStatusFacts {
   completed: boolean;
   errored: boolean;
   explicitStatus?: SessionStatus;
+  approvalRequested?: boolean;
+  approvalRequestedAt?: string;
 }
 
 export interface ParsedWatchedSession {

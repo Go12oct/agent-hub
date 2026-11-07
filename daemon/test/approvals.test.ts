@@ -248,6 +248,7 @@ describe('Claude approvals over HTTP', () => {
         method: 'POST', url: '/api/sessions/claude-code:missing/approval', headers: auth, payload: { decision: 'allow' },
       })).statusCode).toBe(404);
       expect((await hook).json()).toEqual({});
+      expect(runtime.sessions.get('claude-code:perm-1')?.status).not.toBe('needs_input');
 
       const held = runtime.app.inject({ method: 'POST', url: '/hooks/claude?token=test-token', payload: permissionRequest });
       await vi.waitFor(() => expect(runtime.sessions.get('claude-code:perm-1')?.status).toBe('needs_input'));

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
+import { defaultApprovalHoldSeconds } from '../claude-hooks.js';
 import type { EmitSession } from './types.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
@@ -19,6 +20,7 @@ export interface ClaudeHookPayload {
   cwd?: string;
   transcript_path?: string;
   message?: string;
+  error?: string;
   notification_type?: string;
 }
 
@@ -36,7 +38,14 @@ export function mapClaudeHook(event: string, payload: ClaudeHookPayload = {}): S
   return undefined;
 }
 
-export function claudeHookOverride(fileModifiedAt: number, status: SessionStatus, hookAt: number): SessionStatus | undefined {
+export function claudeHookOverride(
+  fileModifiedAt: number,
+  status: SessionStatus,
+  hookAt: number,
+  now = Date.now(),
+  approvalHoldMs = defaultApprovalHoldSeconds * 1000,
+): SessionStatus | undefined {
+  if (status === 'needs_input' && now - hookAt > approvalHoldMs + 60_000) return undefined;
   return fileModifiedAt <= hookAt ? status : undefined;
 }
 
@@ -99,27 +108,44 @@ export function parseClaudeRecords(
 export class ClaudeCollector extends WatchedCollector {
   name = 'claude-code';
   private hookOverrides = new Map<string, { status: SessionStatus; at: number; message?: string }>();
+  private readonly days: number;
+  private readonly approvalHoldMs: number;
+  private readonly now: () => number;
   protected roots(): string[] { return [path.join(agentHome(), '.claude', 'projects')]; }
   protected watchTargets(): { paths: string[]; depth: number } { return { paths: this.roots(), depth: 2 }; }
   protected async findFiles(): Promise<string[]> {
     const { walkFiles } = await import('./files.js');
     return this.recentFiles(await walkFiles(this.roots()[0]!, (file) => file.endsWith('.jsonl')), this.days);
   }
-  constructor(private days = 7) { super(); }
+  constructor(options: { days?: number; approvalHoldMs?: number; now?: () => number } = {}) {
+    super();
+    this.days = options.days ?? 7;
+    this.approvalHoldMs = options.approvalHoldMs ?? defaultApprovalHoldSeconds * 1000;
+    this.now = options.now ?? Date.now;
+  }
+  private activeHookOverride(nativeId: string, now = this.now()): { status: SessionStatus; at: number; message?: string } | undefined {
+    const hook = this.hookOverrides.get(nativeId);
+    if (hook?.status === 'needs_input' && now - hook.at > this.approvalHoldMs + 60_000) {
+      this.hookOverrides.delete(nativeId);
+      return undefined;
+    }
+    return hook;
+  }
   protected shouldRetain(session: AgentSession): boolean {
-    return this.hookOverrides.has(session.nativeId);
+    return Boolean(this.activeHookOverride(session.nativeId));
   }
   async applyHook(payload: ClaudeHookPayload, emit: EmitSession | undefined = this.emit): Promise<void> {
     if (!payload.session_id || !payload.hook_event_name) return;
     const status = mapClaudeHook(payload.hook_event_name, payload);
     if (!status) return;
-    this.hookOverrides.set(payload.session_id, { status, at: Date.now(), message: payload.message });
+    const now = this.now();
+    this.hookOverrides.set(payload.session_id, { status, at: now, message: payload.message });
     const existing = this.sessions.get(`claude-code:${payload.session_id}`);
     if (existing) {
       const updated = {
         ...existing,
         status,
-        updatedAt: new Date().toISOString(),
+        updatedAt: new Date(now).toISOString(),
         ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
       };
       this.sessions.set(existing.id, updated);
@@ -127,12 +153,33 @@ export class ClaudeCollector extends WatchedCollector {
     } else if (payload.cwd) {
       const updated = buildSession({
         agent: 'claude-code', nativeId: payload.session_id, cwd: payload.cwd,
-        title: payload.message || 'Claude Code session', status, updatedAt: new Date().toISOString(),
+        title: payload.message || 'Claude Code session', status, updatedAt: new Date(now).toISOString(),
         ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
       });
       this.sessions.set(updated.id, updated);
       emit?.(updated);
     }
+  }
+  async clearNeedsInput(sessionId: string, emit: EmitSession | undefined = this.emit): Promise<void> {
+    const nativeId = sessionId.startsWith('claude-code:') ? sessionId.slice('claude-code:'.length) : sessionId;
+    const hook = this.activeHookOverride(nativeId);
+    if (!hook || hook.status !== 'needs_input') return;
+    this.hookOverrides.delete(nativeId);
+    if (this.fileById.has(nativeId)) {
+      await this.rescan();
+      return;
+    }
+    const existing = this.sessions.get(`claude-code:${nativeId}`);
+    if (!existing) return;
+    const now = this.now();
+    const updated = {
+      ...existing,
+      status: inferStatus(existing.updatedAt, existing.lastRole, false, false, now),
+      updatedAt: new Date(now).toISOString(),
+      lastMessage: undefined,
+    };
+    this.sessions.set(updated.id, updated);
+    emit?.(updated);
   }
   protected async parse(file: string): Promise<ParsedWatchedSession | undefined> {
     const records = await parseJsonLines(file);
@@ -145,9 +192,9 @@ export class ClaudeCollector extends WatchedCollector {
   }
   protected refreshSession(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
     const session = super.refreshSession(parsed, mtimeMs, now);
-    const hook = this.hookOverrides.get(session.nativeId);
+    const hook = this.activeHookOverride(session.nativeId, now);
     if (!hook) return session;
-    const override = claudeHookOverride(mtimeMs, hook.status, hook.at);
+    const override = claudeHookOverride(mtimeMs, hook.status, hook.at, now, this.approvalHoldMs);
     if (!override) {
       this.hookOverrides.delete(session.nativeId);
       return session;

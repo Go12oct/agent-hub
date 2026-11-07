@@ -68,7 +68,8 @@ export function createHub(
 ): HubRuntime {
   const app = Fastify({ logger: false });
   const sessions = new Map<string, AgentSession>();
-  const claude = new ClaudeCollector(config.lookbackDays);
+  const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
+  const claude = new ClaudeCollector({ days: config.lookbackDays, approvalHoldMs });
   const collectors: Collector[] = options.collectors || [
     new CodexCollector(config.lookbackDays),
     claude,
@@ -86,7 +87,6 @@ export function createHub(
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
   const approvals = new ApprovalBroker();
   const approvalsEnabled = config.approvals?.enabled !== false;
-  const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
   const eventClients = new Set<{ write: (data: string) => void }>();
 
   const present = (session: AgentSession): AgentSession => {
@@ -262,6 +262,8 @@ export function createHub(
     const result = await outcome;
     if (result === 'allow' || result === 'deny') {
       await claude.applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);
+    } else if ((result === 'timeout' || result === 'cancelled') && approvals.pending(sessionId).length === 0) {
+      await claude.clearNeedsInput(sessionId, emit);
     }
     return hookDecisionBody(result);
   });
