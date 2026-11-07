@@ -27,7 +27,9 @@ export async function runHookBridge(agent: string, options: HookBridgeOptions = 
       token?: unknown;
       approvals?: { holdSeconds?: unknown };
     };
-    const port = Number(config.port);
+    const port = process.env.AGENT_HUB_PORT
+      ? Number(process.env.AGENT_HUB_PORT)
+      : Number(config.port);
     if (!Number.isInteger(port) || port < 1 || port > 65_535 || typeof config.token !== 'string' || !config.token) return;
     const configuredHold = config.approvals?.holdSeconds;
     const holdSeconds = typeof configuredHold === 'number' && Number.isFinite(configuredHold)

@@ -11,6 +11,7 @@ describe('Codex hook bridge', () => {
   afterEach(async () => {
     if (tempDir) await rm(tempDir, { recursive: true, force: true });
     tempDir = undefined;
+    vi.unstubAllEnvs();
   });
 
   it('forwards the hook with bearer auth and writes a successful JSON response', async () => {
@@ -42,6 +43,7 @@ describe('Codex hook bridge', () => {
   });
 
   it('returns successfully with no output when the daemon is unavailable', async () => {
+    vi.stubEnv('AGENT_HUB_PORT', '');
     tempDir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-codex-bridge-down-'));
     await writeFile(path.join(tempDir, 'config.json'), JSON.stringify({ port: 4747, token: 'bridge-token' }));
     const fetchMock = vi.fn(async () => { throw new Error('connection refused'); });
@@ -53,6 +55,40 @@ describe('Codex hook bridge', () => {
       configDir: tempDir,
       fetchImpl: fetchMock as unknown as typeof fetch,
     })).resolves.toBeUndefined();
+    expect(stdout.write).not.toHaveBeenCalled();
+  });
+
+  it('prefers a valid AGENT_HUB_PORT over the config file port', async () => {
+    vi.stubEnv('AGENT_HUB_PORT', '4750');
+    tempDir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-codex-bridge-port-'));
+    await writeFile(path.join(tempDir, 'config.json'), JSON.stringify({ port: 4747, token: 'bridge-token' }));
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+
+    await runHookBridge('codex', {
+      stdin: Readable.from(['{}']),
+      stdout: { write: vi.fn() },
+      configDir: tempDir,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:4750/hooks/codex', expect.any(Object));
+  });
+
+  it('rejects an invalid AGENT_HUB_PORT instead of using the config file port', async () => {
+    vi.stubEnv('AGENT_HUB_PORT', '70000');
+    tempDir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-codex-bridge-invalid-port-'));
+    await writeFile(path.join(tempDir, 'config.json'), JSON.stringify({ port: 4747, token: 'bridge-token' }));
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    const stdout = { write: vi.fn() };
+
+    await runHookBridge('codex', {
+      stdin: Readable.from(['{}']),
+      stdout,
+      configDir: tempDir,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(stdout.write).not.toHaveBeenCalled();
   });
 });
