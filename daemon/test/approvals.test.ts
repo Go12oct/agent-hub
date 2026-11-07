@@ -116,22 +116,6 @@ describe('ntfy notifications', () => {
     expect(ntfyMessage(session({ status: 'error' })).title).toBe('Claude Code hit an error — repo');
   });
 
-  it('builds a secret-request notification for Devin', () => {
-    const message = 'Devin is asking for a secret — open Devin to add it';
-    expect(ntfyMessage(session({
-      id: 'devin:secret',
-      agent: 'devin',
-      nativeId: 'secret',
-      status: 'needs_input',
-      lastMessage: message,
-    }))).toEqual({
-      title: 'Devin needs a secret — repo',
-      body: message,
-      priority: 'high',
-      tags: 'raised_hand',
-    });
-  });
-
   it('posts to the topic with a Click header and only on real transitions', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const notifier = new NtfyNotifier({ topic: 'secret topic' }, fetchImpl as unknown as typeof fetch);

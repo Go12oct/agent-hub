@@ -7,7 +7,7 @@ import type { AgentSession } from '@agent-hub/shared';
 import { CodexCollector, parseCodexRecords } from '../src/collectors/codex';
 import { ClaudeCollector, claudeHookOverride, mapClaudeHook, parseClaudeRecords } from '../src/collectors/claude';
 import { AntigravityCollector, parseAntigravityRecords } from '../src/collectors/antigravity';
-import { asksForSecret, mapDevinStatus, parseDevinMessages, DevinCollector } from '../src/collectors/devin';
+import { mapDevinStatus, parseDevinMessages, DevinCollector } from '../src/collectors/devin';
 import { CodexCloudCollector } from '../src/collectors/codex-cloud';
 import { WatchedCollector, type ParsedWatchedSession } from '../src/collectors/watched';
 import type { EmitSession } from '../src/collectors/types';
@@ -364,14 +364,6 @@ describe('Devin API mapping', () => {
     expect(mapDevinStatus('error')).toBe('error');
   });
 
-  it('recognizes requests for secrets without matching credential-related updates', () => {
-    expect(asksForSecret('I need three keys to continue, and all three prompts are open now: - **Cloudflare API token:** use the new prompt…')).toBe(true);
-    expect(asksForSecret("I'm sending the secret prompts now, saved for all your future sessions.")).toBe(true);
-    expect(asksForSecret('I rotated the API key in the config.')).toBe(false);
-    expect(asksForSecret('Added token refresh logic.')).toBe(false);
-    expect(asksForSecret('Fixed the password reset bug.')).toBe(false);
-  });
-
   it('polls with a personal API key and emits mapped sessions', async () => {
     const fetcher: typeof fetch = async () => new Response(JSON.stringify({ sessions: [{ session_id: 'abc', status_enum: 'blocked', title: 'Triage', structured_output: { repo: 'org/repository' } }] }));
     const collector = new DevinCollector('not-a-real-key', fetcher);
@@ -380,76 +372,6 @@ describe('Devin API mapping', () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     collector.stop();
     expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'needs_input', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
-  });
-
-  it('detects open secret requests from message details and clears them after a user reply', async () => {
-    const secretMessage = 'I need three keys to continue, and all three prompts are open now';
-    const userMessage = 'I added the requested keys.';
-    const cases = [
-      {
-        messages: [
-          { type: 'user_message', message: 'Please continue', timestamp: '2025-01-02T12:00:01.000Z' },
-          { type: 'devin_message', message: secretMessage, timestamp: '2025-01-02T12:00:02.000Z' },
-        ],
-        expected: { status: 'needs_input', lastMessage: 'Devin is asking for a secret — open Devin to add it' },
-      },
-      {
-        messages: [
-          { type: 'user_message', message: 'Please continue', timestamp: '2025-01-02T12:00:01.000Z' },
-          { type: 'devin_message', message: secretMessage, timestamp: '2025-01-02T12:00:02.000Z' },
-          { type: 'user_message', message: userMessage, timestamp: '2025-01-02T12:00:03.000Z' },
-        ],
-        expected: { status: 'working', lastMessage: userMessage },
-      },
-    ];
-    for (const [index, testCase] of cases.entries()) {
-      let detailCalls = 0;
-      const fetcher: typeof fetch = async (input) => {
-        if (String(input).endsWith('/sessions?limit=50')) {
-          return new Response(JSON.stringify({ sessions: [{
-            session_id: `secret-${index}`, status_enum: 'working', updated_at: '2025-01-02T12:00:04.000Z',
-          }] }));
-        }
-        detailCalls++;
-        return new Response(JSON.stringify({ messages: testCase.messages }));
-      };
-      class TestDevinCollector extends DevinCollector {
-        refresh(): Promise<void> { return this.poll(); }
-      }
-      const collector = new TestDevinCollector('not-a-real-key', fetcher);
-      const emitted: AgentSession[] = [];
-      collector.start((session) => emitted.push(session));
-      try {
-        await vi.waitFor(() => expect(detailCalls).toBe(1));
-        await vi.waitFor(() => expect(emitted.at(-1)?.lastMessage).toBe(testCase.expected.lastMessage));
-        expect(emitted.at(-1)).toMatchObject(testCase.expected);
-      } finally {
-        collector.stop();
-      }
-    }
-  });
-
-  it('limits detail polling to the five most recently updated active sessions', async () => {
-    const detailIds: string[] = [];
-    const sessions = Array.from({ length: 6 }, (_, index) => ({
-      session_id: `session-${index}`,
-      status_enum: 'working',
-      updated_at: new Date(Date.UTC(2025, 0, 2, 12, index)).toISOString(),
-    }));
-    const fetcher: typeof fetch = async (input) => {
-      const url = String(input);
-      if (url.endsWith('/sessions?limit=50')) return new Response(JSON.stringify({ sessions }));
-      detailIds.push(decodeURIComponent(url.split('/').at(-1)!));
-      return new Response(JSON.stringify({ messages: [] }));
-    };
-    const collector = new DevinCollector('not-a-real-key', fetcher);
-    collector.start(() => {});
-    try {
-      await vi.waitFor(() => expect(detailIds).toHaveLength(5));
-      expect(detailIds).toEqual(['session-5', 'session-4', 'session-3', 'session-2', 'session-1']);
-    } finally {
-      collector.stop();
-    }
   });
 
   it('maps message types and invalidates cached messages when updated_at changes', async () => {

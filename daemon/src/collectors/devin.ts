@@ -3,17 +3,6 @@ import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/sha
 import type { Collector, EmitSession } from './types.js';
 import { projectName } from './files.js';
 
-const credentialWords = String.raw`\b(?:secret|api[\s-]+keys?|tokens?|keys?|credentials?|passwords?)\b`;
-const requestWords = String.raw`\b(?:prompts?|needs?|provide|paste|enter|add|create|send\s+me|waiting\s+for|while\s+you\s+create)\b`;
-const secretRequestPattern = new RegExp(
-  `(?:${credentialWords}[^.!?\\r\\n]{0,120}${requestWords}|${requestWords}[^.!?\\r\\n]{0,120}${credentialWords})`,
-  'i',
-);
-
-export function asksForSecret(text: string): boolean {
-  return text.split(/[.!?\r\n]+/).some((sentence) => secretRequestPattern.test(sentence));
-}
-
 export function parseDevinMessages(rows: unknown): SessionMessage[] {
   if (!Array.isArray(rows)) return [];
   return rows.flatMap((value): SessionMessage[] => {
@@ -29,33 +18,6 @@ export function parseDevinMessages(rows: unknown): SessionMessage[] {
     const at = typeof timestamp === 'string' && timestamp ? timestamp : undefined;
     return [{ role, text: text.slice(0, 20_000), ...(at ? { at } : {}) }];
   });
-}
-
-function latestMessage(messages: SessionMessage[], role: SessionMessage['role']): { message: SessionMessage; index: number; timestamp?: number } | undefined {
-  let latest: { message: SessionMessage; index: number; timestamp?: number } | undefined;
-  for (const [index, message] of messages.entries()) {
-    if (message.role !== role) continue;
-    const parsed = message.at ? Date.parse(message.at) : NaN;
-    const timestamp = Number.isFinite(parsed) ? parsed : undefined;
-    if (!latest
-      || (timestamp !== undefined && latest.timestamp !== undefined
-        ? timestamp > latest.timestamp || (timestamp === latest.timestamp && index > latest.index)
-        : index > latest.index)) {
-      latest = { message, index, ...(timestamp === undefined ? {} : { timestamp }) };
-    }
-  }
-  return latest;
-}
-
-function hasOpenSecretRequest(messages: SessionMessage[]): boolean {
-  const devinMessage = latestMessage(messages, 'assistant');
-  if (!devinMessage || !asksForSecret(devinMessage.message.text)) return false;
-  const userMessage = latestMessage(messages, 'user');
-  if (!userMessage) return true;
-  if (devinMessage.timestamp !== undefined && userMessage.timestamp !== undefined) {
-    return devinMessage.timestamp > userMessage.timestamp;
-  }
-  return devinMessage.index > userMessage.index;
 }
 
 interface CachedDevinMessages {
@@ -93,12 +55,8 @@ export class DevinCollector implements Collector {
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
     const id = `devin:${nativeId}`;
     const updatedAt = this.sessions.get(id)?.updatedAt || '';
-    return (await this.fetchMessages(nativeId, updatedAt)).slice(-limit);
-  }
-  private async fetchMessages(nativeId: string, updatedAt: string): Promise<SessionMessage[]> {
-    const id = `devin:${nativeId}`;
     const cached = this.messagesById.get(nativeId);
-    if (cached?.updatedAt === updatedAt) return cached.messages;
+    if (cached?.updatedAt === updatedAt) return cached.messages.slice(-limit);
     try {
       const response = await this.fetcher(`https://api.devin.ai/v1/sessions/${encodeURIComponent(nativeId)}`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
@@ -112,16 +70,11 @@ export class DevinCollector implements Collector {
       const lastMessage = messages.filter((item) => item.role !== 'tool').at(-1);
       const session = this.sessions.get(id);
       if (session && lastMessage) {
-        const secretRequest = session.updatedAt === updatedAt
-          && ['working', 'needs_input'].includes(session.status)
-          && hasOpenSecretRequest(messages);
-        const updated = secretRequest
-          ? { ...session, status: 'needs_input' as const, lastMessage: 'Devin is asking for a secret — open Devin to add it', lastRole: 'assistant' as const }
-          : { ...session, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
+        const updated = { ...session, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
         this.sessions.set(id, updated);
         this.emit?.(updated);
       }
-      return messages;
+      return messages.slice(-limit);
     } catch { return []; }
   }
   async sendMessage(nativeId: string, text: string): Promise<void> {
@@ -142,7 +95,6 @@ export class DevinCollector implements Collector {
       const data = await response.json() as any;
       const rows = Array.isArray(data) ? data : data.sessions || [];
       const active = new Set<string>();
-      const detailCandidates: Array<{ nativeId: string; updatedAt: string }> = [];
       for (const row of rows) {
         const nativeId = String(row.session_id || row.id || '');
         if (!nativeId) continue;
@@ -155,17 +107,13 @@ export class DevinCollector implements Collector {
         if (cached && cached.updatedAt !== updatedAt) this.messagesById.delete(id);
         const cachedMessages = this.messagesById.get(id);
         const lastMessage = cachedMessages?.messages.filter((item) => item.role !== 'tool').at(-1);
-        const secretRequest = (status === 'working' || status === 'needs_input')
-          && Boolean(cachedMessages && hasOpenSecretRequest(cachedMessages.messages));
         const project = typeof row.structured_output?.repo === 'string' ? projectName(row.structured_output.repo) : undefined;
         const session: AgentSession = {
           id: `devin:${id}`, agent: 'devin', nativeId: id,
           title: String(row.title || row.name || 'Devin session'),
           ...(project ? { project } : {}),
-          status: secretRequest ? 'needs_input' : status,
-          ...(secretRequest
-            ? { lastMessage: 'Devin is asking for a secret — open Devin to add it', lastRole: 'assistant' as const }
-            : lastMessage
+          status,
+          ...(lastMessage
             ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
             : status === 'needs_input' ? { lastMessage: 'Waiting for your input' } : {}),
           canReply: true,
@@ -174,14 +122,6 @@ export class DevinCollector implements Collector {
         };
         this.sessions.set(session.id, session);
         this.emit?.(session);
-        if ((status === 'working' || status === 'needs_input') && !cachedMessages) {
-          detailCandidates.push({ nativeId: id, updatedAt });
-        }
-      }
-      for (const candidate of detailCandidates
-        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-        .slice(0, 5)) {
-        await this.fetchMessages(candidate.nativeId, candidate.updatedAt);
       }
       for (const id of this.sessions.keys()) {
         if (active.has(id)) continue;
