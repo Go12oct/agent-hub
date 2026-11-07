@@ -18,14 +18,19 @@ const fixtures = path.resolve('daemon/test/fixtures/home');
 class CachedFileCollector extends WatchedCollector {
   name = 'cached-test';
   refreshCount = 0;
-  constructor(private root: string, private file: string, private parsedUpdatedAt?: string) { super(); }
+  constructor(
+    private root: string,
+    private file: string,
+    private parsedUpdatedAt?: string,
+    private parsedCompleted = true,
+  ) { super(); }
   protected roots(): string[] { return [this.root]; }
   protected async findFiles(): Promise<string[]> { return [this.file]; }
   async parse(): Promise<ParsedWatchedSession> {
     const updatedAt = this.parsedUpdatedAt ?? new Date().toISOString();
     return {
       session: { id: 'cached-test:fixture', agent: 'codex', nativeId: 'fixture', title: 'Fixture', status: 'working', canReply: false, updatedAt, machine: 'test' },
-      statusFacts: { updatedAt, lastRole: 'assistant', completed: true, errored: false },
+      statusFacts: { updatedAt, lastRole: 'assistant', completed: this.parsedCompleted, errored: false },
     };
   }
   protected async messages(): Promise<[]> { return []; }
@@ -428,6 +433,41 @@ describe('watched collector cache', () => {
       expect(parseSpy).toHaveBeenCalledTimes(1);
     } finally {
       logSpy.mockRestore();
+      await first.stop();
+      await second.stop();
+      await rm(home, { recursive: true, force: true });
+      if (previousConfigDir === undefined) delete process.env.AGENT_HUB_CONFIG_DIR;
+      else process.env.AGENT_HUB_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it('does not emit a changed cached session or notify before reparsing the source file', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-watched-stale-'));
+    const file = path.join(home, 'session.jsonl');
+    await writeFile(file, '{"fixture":true}\n');
+    const previousConfigDir = process.env.AGENT_HUB_CONFIG_DIR;
+    process.env.AGENT_HUB_CONFIG_DIR = path.join(home, 'config');
+    const updatedAt = new Date().toISOString();
+    const first = new CachedFileCollector(home, file, updatedAt);
+    const second = new CachedFileCollector(home, file, new Date().toISOString(), false);
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    const notifier = new NtfyNotifier({ topic: 'cache-stale-test' }, fetchMock as unknown as typeof fetch);
+    const emitted: AgentSession[] = [];
+    const notificationPromises: Promise<void>[] = [];
+    try {
+      await first.scan(() => {});
+      await first.stop();
+      await writeFile(file, '{"fixture":"changed while stopped"}\n');
+
+      second.start((session) => {
+        emitted.push(session);
+        notificationPromises.push(notifier.update(session));
+      });
+      await vi.waitFor(() => expect(emitted.some((session) => session.status === 'working')).toBe(true));
+      expect(emitted.some((session) => session.status === 'done')).toBe(false);
+      await Promise.all(notificationPromises);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
       await first.stop();
       await second.stop();
       await rm(home, { recursive: true, force: true });

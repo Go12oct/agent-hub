@@ -252,6 +252,14 @@ export abstract class WatchedCollector implements Collector {
     this.parsedFiles.clear();
     this.cacheJson = JSON.stringify(cache);
     for (const [source, cached] of restored) {
+      let currentKey: string;
+      try {
+        const fileStat = await stat(source);
+        currentKey = await this.fileCacheKey(source, fileStat.mtimeMs, fileStat.size);
+      } catch {
+        continue;
+      }
+      if (currentKey !== cached.key) continue;
       this.parsedFiles.set(source, cached);
       const session = this.refreshSession(cached.parsed, cached.mtimeMs, Date.now());
       this.sessions.set(session.id, session);
