@@ -226,6 +226,7 @@ export class LocalReplyRunner implements ReplyRunner {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly executables = new Map<ReplyAgent, string>();
   private readonly active = new Map<string, ActiveReply>();
+  private readonly backgroundInFlight = new Set<string>();
   private readonly lastFailure = new Map<string, ReplyFailure>();
   private initPromise?: Promise<void>;
 
@@ -277,7 +278,7 @@ export class LocalReplyRunner implements ReplyRunner {
   }
 
   isRunning(sessionId: string): boolean {
-    return this.active.has(sessionId);
+    return this.active.has(sessionId) || this.backgroundInFlight.has(sessionId);
   }
 
   failure(sessionId: string): ReplyFailure | undefined {
@@ -300,14 +301,21 @@ export class LocalReplyRunner implements ReplyRunner {
     }
 
     if (agent === 'claude-code') {
-      const agents = await this.backgroundClaudeAgents(executable, session.cwd);
-      const background = agents?.find((item) => item.sessionId === session.nativeId);
-      if (background) {
-        if (background.status !== 'idle') {
-          throw new ReplyBusyError('Claude is still working on this chat in the background. Send again when it finishes.');
+      this.backgroundInFlight.add(session.id);
+      this.notify(session.id);
+      try {
+        const agents = await this.backgroundClaudeAgents(executable, session.cwd);
+        const background = agents?.find((item) => item.sessionId === session.nativeId);
+        if (background) {
+          if (background.status !== 'idle') {
+            throw new ReplyBusyError('Claude is still working on this chat in the background. Send again when it finishes.');
+          }
+          await this.resumeBackgroundClaude(executable, background, session, text);
+          return;
         }
-        await this.resumeBackgroundClaude(executable, background, session, text);
-        return;
+      } finally {
+        this.backgroundInFlight.delete(session.id);
+        this.notify(session.id);
       }
     }
 

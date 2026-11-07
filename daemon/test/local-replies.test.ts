@@ -205,6 +205,43 @@ describe('LocalReplyRunner', () => {
     expect(spawnProcess).not.toHaveBeenCalled();
   });
 
+  it('serializes concurrent sends while checking an idle background Claude session', async () => {
+    const calls: string[][] = [];
+    let agentCalls = 0;
+    let releaseInitial: ((result: { stdout: string; stderr: string; exitCode: number }) => void) | undefined;
+    const commandRunner: CommandRunner = async (_executable, args) => {
+      calls.push(args);
+      if (args[0] === 'agents' && ++agentCalls === 1) {
+        return new Promise((resolve) => { releaseInitial = resolve; });
+      }
+      if (args[0] === 'agents') return { stdout: '[]', stderr: '', exitCode: 0 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    };
+    const spawnProcess = vi.fn((_executable: string, _args: string[]) => backgroundChild('backgrounded · short-id', 0));
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner,
+      sleep: async () => {},
+      spawn: spawnProcess as unknown as typeof spawn,
+    });
+    const claude = claudeSession();
+    await runner.init();
+    const first = runner.send(claude, text);
+    await vi.waitFor(() => expect(releaseInitial).toBeTypeOf('function'));
+    expect(runner.isRunning(claude.id)).toBe(true);
+    await expect(runner.send(claude, 'Another message')).rejects.toBeInstanceOf(ReplyBusyError);
+    releaseInitial!({
+      stdout: JSON.stringify([{ id: 'short-id', sessionId: claude.nativeId, status: 'idle' }]),
+      stderr: '',
+      exitCode: 0,
+    });
+    await first;
+    expect(calls.filter(([command]) => command === 'stop')).toEqual([['stop', 'short-id']]);
+    expect(spawnProcess.mock.calls.filter(([, args]) => args[0] === '--bg')).toHaveLength(1);
+    expect(runner.isRunning(claude.id)).toBe(false);
+  });
+
   it('does not pass phone text through a Windows shell shim for background Claude', async () => {
     const runner = new LocalReplyRunner({
       commands: { 'claude-code': 'claude.cmd' },
