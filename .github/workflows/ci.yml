@@ -34,6 +34,7 @@ jobs:
           retention-days: 3
           path: |
             daemon/dist/agent-hub.cjs
+            daemon/dist/hook-bridge.cjs
             daemon/dist/agent-hub.exe
             daemon/public/
           if-no-files-found: ignore

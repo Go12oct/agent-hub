@@ -271,3 +271,97 @@ describe('Claude approvals over HTTP', () => {
     } finally { await runtime.close(); }
   });
 });
+
+describe('Codex approvals over HTTP', () => {
+  const codexRequest = (sessionId: string) => ({
+    session_id: sessionId,
+    hook_event_name: 'PermissionRequest',
+    cwd: '/tmp/project',
+    tool_name: 'Bash',
+    tool_input: { command: 'echo Codex approval' },
+  });
+
+  it('requires bearer auth and returns allow, deny, and timeout decision bodies', async () => {
+    const runtime = createHub({ ...config, approvals: { holdSeconds: 1 } }, {
+      collectors: [new FakeCollector()],
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    try {
+      const unauthorized = await runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/codex?token=test-token',
+        payload: codexRequest('codex-unauthorized'),
+      });
+      expect(unauthorized.statusCode).toBe(401);
+      expect(runtime.sessions.has('codex:codex-unauthorized')).toBe(false);
+
+      for (const decision of ['allow', 'deny'] as const) {
+        const sessionId = `codex-${decision}`;
+        const hook = runtime.app.inject({
+          method: 'POST',
+          url: '/hooks/codex',
+          headers: auth,
+          payload: codexRequest(sessionId),
+        });
+        await vi.waitFor(() => expect(runtime.sessions.get(`codex:${sessionId}`)?.status).toBe('needs_input'));
+        const decided = await runtime.app.inject({
+          method: 'POST',
+          url: `/api/sessions/codex:${sessionId}/approval`,
+          headers: auth,
+          payload: { decision },
+        });
+        expect(decided.statusCode).toBe(204);
+        const response = await hook;
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual(hookDecisionBody(decision));
+        expect(runtime.sessions.get(`codex:${sessionId}`)?.status).toBe('working');
+      }
+
+      const timeoutHook = runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/codex',
+        headers: auth,
+        payload: codexRequest('codex-timeout'),
+      });
+      await vi.waitFor(() => expect(runtime.sessions.get('codex:codex-timeout')?.status).toBe('needs_input'));
+      expect((await timeoutHook).json()).toEqual(hookDecisionBody('timeout'));
+      expect(runtime.sessions.get('codex:codex-timeout')?.status).not.toBe('needs_input');
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('sends one permission notification for a new Codex PermissionRequest', async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const runtime = createHub({ ...config, ntfy: { topic: 't' } }, {
+      collectors: [new FakeCollector()],
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    try {
+      const hook = runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/codex',
+        headers: auth,
+        payload: codexRequest('codex-notification'),
+      });
+      await vi.waitFor(() => expect(runtime.sessions.get('codex:codex-notification')?.status).toBe('needs_input'));
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(String((init.headers as Record<string, string>).Title)).toContain('wants permission');
+
+      const decided = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/codex:codex-notification/approval',
+        headers: auth,
+        payload: { decision: 'allow' },
+      });
+      expect(decided.statusCode).toBe(204);
+      expect((await hook).json()).toEqual(hookDecisionBody('allow'));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime.close();
+      vi.unstubAllGlobals();
+    }
+  });
+});

@@ -9,6 +9,8 @@ import qrcode from 'qrcode-terminal';
 import { format } from 'node:util';
 import { loadConfig, setConfigValue, configDirectory } from './config.js';
 import { installClaudeHooks, uninstallClaudeHooks } from './claude-hooks.js';
+import { installCodexHooks, uninstallCodexHooks } from './codex-hooks.js';
+import { runHookBridge } from './hook-bridge.js';
 import { firewallRuleScript } from './firewall.js';
 import { lanUrls, startServer } from './server.js';
 import { installWindowsService, isDaemonHealthy, uninstallWindowsService } from './windows-service.js';
@@ -58,6 +60,13 @@ async function enableFileLogging(): Promise<void> {
 }
 
 async function run(): Promise<void> {
+  if (isSea()) {
+    const bridgeIndex = process.argv.findIndex((argument) => path.basename(argument).toLowerCase() === 'hook-bridge.cjs');
+    if (bridgeIndex >= 0 && process.argv[bridgeIndex + 1] === 'codex') {
+      await runHookBridge('codex');
+      return;
+    }
+  }
   const [command = 'start', ...args] = process.argv.slice(2);
   if (command === 'start') {
     await enableFileLogging();
@@ -109,6 +118,14 @@ async function run(): Promise<void> {
   } else if (command === 'uninstall-claude-hooks') {
     await uninstallClaudeHooks();
     console.log('Removed Agent Hub Claude Code hooks.');
+  } else if (command === 'install-codex-hooks') {
+    const installed = await installCodexHooks();
+    console.log(installed
+      ? 'Installed Codex hooks. Open Codex and run /hooks once to trust them.'
+      : 'Codex config directory not found; skipping Codex hooks.');
+  } else if (command === 'uninstall-codex-hooks') {
+    await uninstallCodexHooks();
+    console.log('Removed Agent Hub Codex hooks.');
   } else if (command === 'install-service') {
     if (process.platform !== 'win32') {
       console.log('On Windows, run agent-hub install-service to register the AgentHub Scheduled Task.');
@@ -167,7 +184,7 @@ async function run(): Promise<void> {
     }
   } else {
     console.log(`Agent Hub CLI
-Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-service|uninstall-service|config set <key> <value>]
+Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-codex-hooks|uninstall-codex-hooks|install-service|uninstall-service|config set <key> <value>]
 Config directory: ${configDirectory()}`);
   }
 }

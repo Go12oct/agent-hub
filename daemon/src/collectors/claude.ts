@@ -7,8 +7,11 @@ import type { EmitSession } from './types.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
-
-const notificationPromptTtlMs = 30 * 60_000;
+import {
+  activeHookOverride as getActiveHookOverride,
+  hookOverrideForFile,
+  type HookOverride,
+} from './hook-overrides.js';
 
 export function claudeTitle(text: string): string | undefined {
   const clean = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
@@ -40,19 +43,6 @@ export function mapClaudeHook(event: string, payload: ClaudeHookPayload = {}): S
   return undefined;
 }
 
-function hookOverrideExpired(
-  status: SessionStatus,
-  event: string | undefined,
-  hookAt: number,
-  now: number,
-  approvalHoldMs: number,
-): boolean {
-  if (status !== 'needs_input') return false;
-  if (event === 'PermissionRequest') return now - hookAt > approvalHoldMs + 60_000;
-  if (event === 'Notification') return now - hookAt > notificationPromptTtlMs;
-  return false;
-}
-
 export function claudeHookOverride(
   fileModifiedAt: number,
   status: SessionStatus,
@@ -61,8 +51,11 @@ export function claudeHookOverride(
   approvalHoldMs = defaultApprovalHoldSeconds * 1000,
   hookEvent?: string,
 ): SessionStatus | undefined {
-  if (hookOverrideExpired(status, hookEvent, hookAt, now, approvalHoldMs)) return undefined;
-  return fileModifiedAt <= hookAt ? status : undefined;
+  return hookOverrideForFile(fileModifiedAt, {
+    status,
+    at: hookAt,
+    event: hookEvent || '',
+  }, now, approvalHoldMs)?.status;
 }
 
 function isApiErrorMessage(text: string): boolean {
@@ -155,7 +148,7 @@ export function parseClaudeRecords(
 
 export class ClaudeCollector extends WatchedCollector {
   name = 'claude-code';
-  private hookOverrides = new Map<string, { status: SessionStatus; at: number; message?: string; event: string }>();
+  private hookOverrides = new Map<string, HookOverride>();
   private readonly days: number;
   private readonly approvalHoldMs: number;
   private readonly now: () => number;
@@ -172,12 +165,7 @@ export class ClaudeCollector extends WatchedCollector {
     this.now = options.now ?? Date.now;
   }
   private activeHookOverride(nativeId: string, now = this.now()): { status: SessionStatus; at: number; message?: string; event: string } | undefined {
-    const hook = this.hookOverrides.get(nativeId);
-    if (hook && hookOverrideExpired(hook.status, hook.event, hook.at, now, this.approvalHoldMs)) {
-      this.hookOverrides.delete(nativeId);
-      return undefined;
-    }
-    return hook;
+    return getActiveHookOverride(this.hookOverrides, nativeId, now, this.approvalHoldMs);
   }
   protected shouldRetain(session: AgentSession): boolean {
     return Boolean(this.activeHookOverride(session.nativeId));
@@ -251,14 +239,14 @@ export class ClaudeCollector extends WatchedCollector {
     const session = super.refreshSession(parsed, mtimeMs, now);
     const hook = this.activeHookOverride(session.nativeId, now);
     if (!hook) return session;
-    const override = claudeHookOverride(mtimeMs, hook.status, hook.at, now, this.approvalHoldMs, hook.event);
+    const override = hookOverrideForFile(mtimeMs, hook, now, this.approvalHoldMs);
     if (!override) {
       this.hookOverrides.delete(session.nativeId);
       return session;
     }
     return {
       ...session,
-      status: override,
+      status: override.status,
       ...(hook.status === 'error' ? { lastMessage: hook.message } : {}),
       updatedAt: new Date(Math.max(Date.parse(session.updatedAt), hook.at)).toISOString(),
     };

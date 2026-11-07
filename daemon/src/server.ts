@@ -6,9 +6,9 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { agentLabels, type AgentSession, type SessionMessage } from '@agent-hub/shared';
-import type { Collector } from './collectors/types.js';
+import type { Collector, EmitSession } from './collectors/types.js';
 import { ClaudeCollector, type ClaudeHookPayload } from './collectors/claude.js';
-import { CodexCollector } from './collectors/codex.js';
+import { CodexCollector, type CodexHookPayload } from './collectors/codex.js';
 import { AntigravityCollector } from './collectors/antigravity.js';
 import { DevinCollector } from './collectors/devin.js';
 import { CodexCloudCollector } from './collectors/codex-cloud.js';
@@ -26,11 +26,11 @@ export interface HubRuntime {
   close(): Promise<void>;
 }
 
-function authorized(request: any, token: string): boolean {
+function authorized(request: any, token: string, allowQuery = true): boolean {
   const header = request.headers.authorization;
   const supplied = typeof header === 'string' && header.startsWith('Bearer ')
     ? header.slice(7)
-    : typeof request.query?.token === 'string' ? request.query.token : '';
+    : allowQuery && typeof request.query?.token === 'string' ? request.query.token : '';
   const expectedBuffer = Buffer.from(token);
   const suppliedBuffer = Buffer.from(supplied);
   return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer);
@@ -69,9 +69,10 @@ export function createHub(
   const app = Fastify({ logger: false });
   const sessions = new Map<string, AgentSession>();
   const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
+  const codex = new CodexCollector(config.lookbackDays, approvalHoldMs);
   const claude = new ClaudeCollector({ days: config.lookbackDays, approvalHoldMs });
   const collectors: Collector[] = options.collectors || [
-    new CodexCollector(config.lookbackDays),
+    codex,
     claude,
     new AntigravityCollector(config.lookbackDays),
     ...(config.devinApiKey ? [new DevinCollector(config.devinApiKey)] : []),
@@ -159,6 +160,9 @@ export function createHub(
     if (request.url.startsWith('/hooks/claude') && !authorized(request, config.token)) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
+    if (request.url.startsWith('/hooks/codex') && !authorized(request, config.token, false)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
   });
   app.get('/api/sessions', async () => [...sessions.values()].map(present).sort((a, b) => {
     const rank = (status: AgentSession['status']) => status === 'needs_input' ? 0 : status === 'working' ? 1 : 2;
@@ -241,32 +245,67 @@ export function createHub(
     if (result === 'stale') return reply.code(409).send({ error: 'A newer request replaced this one. Check the chat again.' });
     return reply.code(204).send();
   });
-  app.post<{ Body: Record<string, unknown> }>('/hooks/claude', async (request, reply) => {
-    const payload = (request.body || {}) as ClaudeHookPayload & { tool_name?: unknown; tool_input?: unknown };
-    if (!payload.session_id) {
-      await claude.applyHook(payload, emit);
-      return { ok: true };
-    }
-    const sessionId = `claude-code:${payload.session_id}`;
-    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
-    const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input as Record<string, unknown> : undefined;
-    if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
-      await claude.applyHook(payload, emit);
-      if (payload.hook_event_name === 'PreToolUse' && toolName) approvals.cancelSession(sessionId, { name: toolName, input: toolInput });
-      else if (['UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd'].includes(payload.hook_event_name || '')) approvals.cancelSession(sessionId);
-      return { ok: true };
-    }
-    const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
-    reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
-    await claude.applyHook(payload, emit);
-    const result = await outcome;
-    if (result === 'allow' || result === 'deny') {
-      await claude.applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);
-    } else if ((result === 'timeout' || result === 'cancelled') && approvals.pending(sessionId).length === 0) {
-      await claude.clearNeedsInput(sessionId, emit);
-    }
-    return hookDecisionBody(result);
-  });
+  interface HookPayload {
+    session_id?: string;
+    hook_event_name?: string;
+    cwd?: string;
+    message?: string;
+    tool_name?: unknown;
+    tool_input?: unknown;
+  }
+  const registerHookHandler = (
+    route: string,
+    sessionPrefix: string,
+    cancelEvents: string[],
+    applyHook: (payload: HookPayload, emit: EmitSession) => Promise<void>,
+    clearNeedsInput: (sessionId: string, emit: EmitSession) => Promise<void>,
+  ) => {
+    app.post<{ Body: Record<string, unknown> }>(route, async (request, reply) => {
+      const payload = (request.body || {}) as HookPayload;
+      if (!payload.session_id) {
+        await applyHook(payload, emit);
+        return { ok: true };
+      }
+      const sessionId = `${sessionPrefix}:${payload.session_id}`;
+      const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
+      const toolInput = payload.tool_input && typeof payload.tool_input === 'object'
+        ? payload.tool_input as Record<string, unknown>
+        : undefined;
+      if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
+        await applyHook(payload, emit);
+        if (payload.hook_event_name === 'PreToolUse' && toolName) {
+          approvals.cancelSession(sessionId, { name: toolName, input: toolInput });
+        } else if (cancelEvents.includes(payload.hook_event_name || '')) {
+          approvals.cancelSession(sessionId);
+        }
+        return { ok: true };
+      }
+      const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
+      reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
+      await applyHook(payload, emit);
+      const result = await outcome;
+      if (result === 'allow' || result === 'deny') {
+        await applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);
+      } else if ((result === 'timeout' || result === 'cancelled') && approvals.pending(sessionId).length === 0) {
+        await clearNeedsInput(sessionId, emit);
+      }
+      return hookDecisionBody(result);
+    });
+  };
+  registerHookHandler(
+    '/hooks/claude',
+    'claude-code',
+    ['UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd'],
+    (payload, sessionEmitter) => claude.applyHook(payload as ClaudeHookPayload, sessionEmitter),
+    (sessionId, sessionEmitter) => claude.clearNeedsInput(sessionId, sessionEmitter),
+  );
+  registerHookHandler(
+    '/hooks/codex',
+    'codex',
+    ['UserPromptSubmit', 'Stop', 'SessionEnd'],
+    (payload, sessionEmitter) => codex.applyHook(payload as CodexHookPayload, sessionEmitter),
+    (sessionId, sessionEmitter) => codex.clearNeedsInput(sessionId, sessionEmitter),
+  );
   const staticCandidates = [
     path.join(path.dirname(path.resolve(process.argv[1] || process.execPath)), 'public'),
     path.join(path.dirname(process.execPath), 'public'),

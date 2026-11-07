@@ -97,6 +97,7 @@ describe('Codex transcript parser', () => {
     const now = Date.parse('2025-01-02T10:00:09.000Z');
     const parsed = parseCodexRecords(await fixtureLines('.codex/sessions/2025/01/02/rollout-codex-fixture.jsonl'), 'codex-fixture', now);
     expect(parsed.session.title).toBe('Fix the live feed sorting');
+    expect(parsed.session.nativeId).toBe('codex-fixture');
     expect(parsed.session.project).toBe('project');
     expect(parsed.session.branch).toBe('feature/feed');
     expect(parsed.session.status).toBe('done');
@@ -178,6 +179,63 @@ describe('Codex transcript parser', () => {
       { type: 'event_msg', payload: { type: 'exec_approval_request' } },
     ], 'approval-unknown-time', now);
     expect(missingTimestamp.session.status).not.toBe('needs_input');
+  });
+});
+
+describe('Codex collector hooks', () => {
+  class TestCodexCollector extends CodexCollector {
+    refresh(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
+      return this.refreshSession(parsed, mtimeMs, now);
+    }
+    retains(session: AgentSession): boolean {
+      return this.shouldRetain(session);
+    }
+  }
+
+  it('sets needs_input from the hook and clears it after PreToolUse or a changed transcript', async () => {
+    const base = Date.now();
+    let now = base;
+    const collector = new TestCodexCollector(7, 300_000, () => now);
+    const emitted: AgentSession[] = [];
+    const emit = (session: AgentSession) => emitted.push(session);
+    const request = { session_id: 'codex-fixture', hook_event_name: 'PermissionRequest', cwd: '/tmp/project' };
+    await collector.applyHook(request, emit);
+    expect(emitted.at(-1)).toMatchObject({
+      id: 'codex:codex-fixture',
+      nativeId: 'codex-fixture',
+      status: 'needs_input',
+    });
+
+    await collector.applyHook({ ...request, hook_event_name: 'PreToolUse' }, emit);
+    expect(emitted.at(-1)?.status).toBe('working');
+    await collector.applyHook(request, emit);
+    await collector.clearNeedsInput('codex:codex-fixture', emit);
+    expect(emitted.at(-1)?.status).not.toBe('needs_input');
+    expect(collector.retains(emitted.at(-1)!)).toBe(false);
+
+    const changedCollector = new TestCodexCollector(7, 300_000, () => now);
+    await changedCollector.applyHook(request, emit);
+    const timestamp = new Date(base).toISOString();
+    const parsed = parseCodexRecords([
+      { type: 'session_meta', timestamp, payload: { meta: { id: 'codex-fixture', cwd: '/tmp/project', timestamp } } },
+    ], 'rollout-file', base);
+    now = base + 2_000;
+    const changedTranscript = changedCollector.refresh({ session: parsed.session, statusFacts: parsed.statusFacts }, base + 1, now);
+    expect(changedTranscript.nativeId).toBe('codex-fixture');
+    expect(changedTranscript.status).not.toBe('needs_input');
+    expect(changedCollector.retains(changedTranscript)).toBe(false);
+
+    const expiringCollector = new TestCodexCollector(7, 300_000, () => now);
+    now = base;
+    await expiringCollector.applyHook(request, emit);
+    now = base + 360_001;
+    const expired = expiringCollector.refresh({ session: parsed.session, statusFacts: parsed.statusFacts }, base, now);
+    expect(expired.status).not.toBe('needs_input');
+    expect(expiringCollector.retains(expired)).toBe(false);
+
+    await collector.stop();
+    await changedCollector.stop();
+    await expiringCollector.stop();
   });
 });
 

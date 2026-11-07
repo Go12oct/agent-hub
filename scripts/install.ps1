@@ -7,6 +7,7 @@ $installDir = Join-Path $env:LOCALAPPDATA "agent-hub"
 $sourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $bundle = Join-Path $sourceDir "..\daemon\dist\agent-hub.cjs"
 $standalone = Join-Path $sourceDir "..\daemon\dist\agent-hub.exe"
+$hookBridgeSource = Join-Path $sourceDir "..\daemon\dist\hook-bridge.cjs"
 $webDir = Join-Path $sourceDir "..\daemon\public"
 if (Test-Path $standalone) {
   New-Item -ItemType Directory -Force -Path $installDir | Out-Null
@@ -30,6 +31,10 @@ if (Test-Path $standalone) {
   $shim = Join-Path $installDir "agent-hub.cmd"
   Set-Content -Path $shim -Value "@echo off`r`nnode `"$installDir\agent-hub.cjs`" %*"
 }
+if (-not (Test-Path $hookBridgeSource)) {
+  Write-Error "The Codex hook bridge was not found at $hookBridgeSource."
+}
+Copy-Item $hookBridgeSource (Join-Path $installDir "hook-bridge.cjs") -Force
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (($userPath -split ';') -notcontains $installDir) {
   $updatedPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
@@ -47,6 +52,7 @@ if ($LASTEXITCODE -ne 0) {
   Write-Warning "The Agent Hub Firewall rule was not added. Run 'agent-hub firewall' as administrator."
 }
 & $shim install-claude-hooks
+& $shim install-codex-hooks
 if (-not $SkipPair) {
   & $shim pair
 }
