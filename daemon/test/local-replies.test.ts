@@ -199,18 +199,42 @@ describe('LocalReplyRunner', () => {
   afterEach(() => vi.useRealTimers());
 
   it('reports Devin Local capability only for local sessions when Devin is resolved', async () => {
-    const runner = new LocalReplyRunner({
-      commands: { devin: 'devin.exe' },
-      resolve: async () => undefined,
-    });
-    await runner.init();
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'devin-local-reply-'));
+    try {
+      const session = { ...devinLocalSession(), cwd };
+      const runner = new LocalReplyRunner({
+        commands: { devin: 'devin.exe' },
+        resolve: async () => undefined,
+      });
+      await runner.init();
 
-    expect(runner.canReplyTo(devinLocalSession())).toBe(true);
-    expect(runner.canReplyTo({ ...devinLocalSession(), id: 'devin:cloud-session' })).toBe(false);
+      expect(runner.canReplyTo(session)).toBe(true);
+      expect(runner.canReplyTo({ ...session, id: 'devin:cloud-session' })).toBe(false);
+      expect(runner.canReplyTo({ ...session, cwd: undefined })).toBe(false);
+      expect(runner.canReplyTo({ ...session, cwd: path.join(cwd, 'missing') })).toBe(false);
 
-    const unavailable = new LocalReplyRunner({ resolve: async () => undefined });
-    await unavailable.init();
-    expect(unavailable.canReplyTo(devinLocalSession())).toBe(false);
+      const unavailable = new LocalReplyRunner({ resolve: async () => undefined });
+      await unavailable.init();
+      expect(unavailable.canReplyTo(session)).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['devin.cmd', 'devin.bat'])('rejects Windows shell executable %s for Devin Local replies', async (executable) => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'devin-local-reply-'));
+    try {
+      const runner = new LocalReplyRunner({
+        commands: { devin: executable },
+        resolve: async () => undefined,
+        platform: 'win32',
+      });
+      await runner.init();
+
+      expect(runner.canReplyTo({ ...devinLocalSession(), cwd })).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it('sends Devin Local replies with a sanitized environment', async () => {

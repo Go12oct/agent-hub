@@ -246,6 +246,7 @@ export class LocalReplyRunner implements ReplyRunner {
   private readonly commands: Partial<Record<ReplyAgent, string>>;
   private readonly timeoutMs: number;
   private readonly startupMs: number;
+  private readonly platform: NodeJS.Platform;
   private readonly commandRunner: CommandRunner;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly executables = new Map<ReplyAgent, string>();
@@ -262,6 +263,7 @@ export class LocalReplyRunner implements ReplyRunner {
     sleep?: (ms: number) => Promise<void>;
     timeoutMs?: number;
     startupMs?: number;
+    platform?: NodeJS.Platform;
   } = {}) {
     this.spawnProcess = options.spawn || spawn;
     this.resolve = options.resolve || resolveExecutable;
@@ -270,6 +272,7 @@ export class LocalReplyRunner implements ReplyRunner {
     this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.timeoutMs = options.timeoutMs ?? 20 * 60_000;
     this.startupMs = options.startupMs ?? 3_000;
+    this.platform = options.platform ?? process.platform;
   }
 
   init(): Promise<void> {
@@ -290,7 +293,15 @@ export class LocalReplyRunner implements ReplyRunner {
 
   canReplyTo(session: AgentSession): boolean {
     if (session.agent === 'devin') {
-      return session.id.startsWith('devin-local:') && this.supports('devin');
+      if (!session.id.startsWith('devin-local:')) return false;
+      const executable = this.executables.get('devin');
+      if (!executable || (this.platform === 'win32' && /\.(?:cmd|bat)$/i.test(executable))) return false;
+      if (!session.cwd) return false;
+      try {
+        return statSync(session.cwd).isDirectory();
+      } catch {
+        return false;
+      }
     }
     if (session.agent !== 'antigravity') {
       return (session.agent === 'codex' || session.agent === 'claude-code')
