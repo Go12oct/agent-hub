@@ -190,6 +190,37 @@ describe('ntfy notifications', () => {
     expect(sessionNotificationSequence(sessionId)).toBe(`ah-s-${createHash('sha1').update(sessionId).digest('hex').slice(0, 32)}`);
   });
 
+  it('retries failed ntfy clears on a later update and stops retrying after success', async () => {
+    const clearUrls: string[] = [];
+    let failNextClear = true;
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        clearUrls.push(url);
+        if (failNextClear) {
+          failNextClear = false;
+          return new Response(null, { status: 503 });
+        }
+      }
+      return new Response(null, { status: 200 });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+      const approval = { id: 'ap-retry', toolName: 'Bash', summary: 'Run: ls', requestedAt: new Date().toISOString() };
+      const sessionId = 'claude-code:clear-retry';
+      await notifier.update(session({ id: sessionId, status: 'needs_input', approval, approvals: [approval] }));
+      await notifier.update(session({ id: sessionId, status: 'needs_input', approvals: [] }));
+      expect(clearUrls).toHaveLength(1);
+
+      await notifier.update(session({ id: 'codex:other', agent: 'codex', status: 'working' }));
+      expect(clearUrls).toEqual([clearUrls[0], clearUrls[0]]);
+      await notifier.update(session({ id: 'codex:another', agent: 'codex', status: 'working' }));
+      expect(clearUrls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('suppresses old first-seen sessions unless they have a pending approval', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const oldUpdatedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();

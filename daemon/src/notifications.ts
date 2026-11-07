@@ -42,9 +42,11 @@ export function sessionNotificationSequence(sessionId: string): string {
 export class NtfyNotifier {
   private previous = new Map<string, { status: SessionStatus; approvalIds: Set<string> }>();
   private sentAt = new Map<string, number>();
+  private pendingClears = new Set<string>();
   constructor(private config?: { server?: string; topic: string }, private fetchImpl: typeof fetch = fetch) {}
 
   async update(session: AgentSession): Promise<void> {
+    if (this.config?.topic) await this.retryPendingClears();
     const previous = this.previous.get(session.id);
     const approvals = session.approvals ?? (session.approval ? [session.approval] : []);
     const approvalIds = new Set(approvals.map((item) => item.id));
@@ -52,8 +54,8 @@ export class NtfyNotifier {
     if (!this.config?.topic) return;
     const removedApprovals = [...(previous?.approvalIds ?? [])].filter((id) => !approvalIds.has(id));
     const sessionNeedsYouCleared = previous?.status === 'needs_input' && session.status !== 'needs_input';
-    for (const id of removedApprovals) await this.clear(`ah-${id}`);
-    if (sessionNeedsYouCleared) await this.clear(sessionNotificationSequence(session.id));
+    for (const id of removedApprovals) await this.clearAndQueue(`ah-${id}`);
+    if (sessionNeedsYouCleared) await this.clearAndQueue(sessionNotificationSequence(session.id));
 
     const newApprovals = approvals.filter((item) => !previous?.approvalIds.has(item.id));
     const now = Date.now();
@@ -97,13 +99,34 @@ export class NtfyNotifier {
     }
   }
 
-  private async clear(sequenceId: string): Promise<void> {
+  private async clearAndQueue(sequenceId: string): Promise<void> {
+    if (await this.clear(sequenceId)) return;
+    this.pendingClears.add(sequenceId);
+    while (this.pendingClears.size > 200) {
+      const oldest = this.pendingClears.values().next().value;
+      if (oldest === undefined) break;
+      this.pendingClears.delete(oldest);
+    }
+  }
+
+  private async retryPendingClears(): Promise<void> {
+    for (const sequenceId of this.pendingClears) {
+      if (await this.clear(sequenceId)) this.pendingClears.delete(sequenceId);
+    }
+  }
+
+  private async clear(sequenceId: string): Promise<boolean> {
     const url = `${(this.config!.server || defaultNtfyServer).replace(/\/$/, '')}/${encodeURIComponent(this.config!.topic)}/${encodeURIComponent(sequenceId)}/clear`;
     try {
       const response = await this.fetchImpl(url, { method: 'PUT' });
-      if (!response.ok) console.warn('[ntfy] notification clear failed');
+      if (!response.ok) {
+        console.warn('[ntfy] notification clear failed');
+        return false;
+      }
+      return true;
     } catch {
       console.warn('[ntfy] notification clear failed');
+      return false;
     }
   }
 }
