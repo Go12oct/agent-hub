@@ -483,6 +483,32 @@ describe('Claude Code hooks', () => {
     expect(stopFailure.session.status).toBe('error');
     expect(stopFailure.session.lastMessage).toBe('Error: Tool execution failed');
   });
+
+  it('clears transcript error state after a later user message or successful assistant reply', () => {
+    const now = Date.now();
+    const apiError = {
+      type: 'assistant',
+      timestamp: new Date(now - 2_000).toISOString(),
+      message: { role: 'assistant', content: 'API Error: 500 missing csrf token' },
+    };
+    const recoveredReply = parseClaudeRecords([
+      apiError,
+      {
+        type: 'assistant',
+        timestamp: new Date(now - 1_000).toISOString(),
+        message: { role: 'assistant', content: 'The request succeeded.', stop_reason: 'end_turn' },
+      },
+    ], 'claude-recovered', new Date(now).toISOString(), now);
+    expect(recoveredReply.session.status).not.toBe('error');
+    expect(recoveredReply.session.lastMessage).toBe('The request succeeded.');
+
+    const recoveredPrompt = parseClaudeRecords([
+      apiError,
+      { type: 'user', timestamp: new Date(now - 1_000).toISOString(), message: { role: 'user', content: 'Please try again.' } },
+    ], 'claude-retried', new Date(now).toISOString(), now);
+    expect(recoveredPrompt.session.status).not.toBe('error');
+    expect(recoveredPrompt.session.lastMessage).toBe('Please try again.');
+  });
 });
 
 describe('Antigravity transcript parser', () => {

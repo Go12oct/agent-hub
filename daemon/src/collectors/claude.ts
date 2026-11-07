@@ -89,13 +89,20 @@ export function parseClaudeRecords(
     const role = row.type === 'user' || row.type === 'assistant' ? row.type : row.message?.role;
     const content = row.message?.content ?? row.content;
     const text = textFromContent(content);
+    const recordError = errorText(row.error) || errorText(row.message?.error)
+      || (row.type === 'stop_failure' && typeof row.message === 'string' ? errorText(row.message) : undefined);
+    const apiError = role === 'assistant' && Boolean(text) && isApiErrorMessage(text);
     if (role && text) {
       const mappedRole = role === 'assistant' ? 'assistant' : 'user';
       messages.push(message(text, mappedRole, row.timestamp));
       if (mappedRole === 'user' && !title) title = claudeTitle(text);
       lastRole = mappedRole;
       lastMessage = text;
-      if (role === 'assistant' && isApiErrorMessage(text)) {
+      if (mappedRole === 'user' || (mappedRole === 'assistant' && !apiError && !recordError)) {
+        errored = false;
+        lastErrorMessage = undefined;
+      }
+      if (apiError) {
         errored = true;
         lastErrorMessage = text;
       }
@@ -108,8 +115,6 @@ export function parseClaudeRecords(
       complete = stopReason === 'end_turn' || (stopReason !== 'tool_use' && !hasToolUse);
     }
     if (row.type === 'summary' && typeof row.summary === 'string' && !title) title = row.summary.slice(0, 180);
-    const recordError = errorText(row.error) || errorText(row.message?.error)
-      || (row.type === 'stop_failure' && typeof row.message === 'string' ? errorText(row.message) : undefined);
     if (row.type === 'stop_failure' || recordError) {
       errored = true;
       if (recordError) lastErrorMessage = recordError;
