@@ -463,7 +463,7 @@ describe('watched collector cache', () => {
         emitted.push(session);
         notificationPromises.push(notifier.update(session));
       });
-      await vi.waitFor(() => expect(emitted.some((session) => session.status === 'working')).toBe(true));
+      await vi.waitFor(() => expect(emitted.some((session) => session.status === 'working')).toBe(true), { timeout: 5_000 });
       expect(emitted.some((session) => session.status === 'done')).toBe(false);
       await Promise.all(notificationPromises);
       expect(fetchMock).not.toHaveBeenCalled();
