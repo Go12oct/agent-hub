@@ -44,8 +44,9 @@ export function claudeHookOverride(
   hookAt: number,
   now = Date.now(),
   approvalHoldMs = defaultApprovalHoldSeconds * 1000,
+  hookEvent?: string,
 ): SessionStatus | undefined {
-  if (status === 'needs_input' && now - hookAt > approvalHoldMs + 60_000) return undefined;
+  if (status === 'needs_input' && hookEvent === 'PermissionRequest' && now - hookAt > approvalHoldMs + 60_000) return undefined;
   return fileModifiedAt <= hookAt ? status : undefined;
 }
 
@@ -139,7 +140,7 @@ export function parseClaudeRecords(
 
 export class ClaudeCollector extends WatchedCollector {
   name = 'claude-code';
-  private hookOverrides = new Map<string, { status: SessionStatus; at: number; message?: string }>();
+  private hookOverrides = new Map<string, { status: SessionStatus; at: number; message?: string; event: string }>();
   private readonly days: number;
   private readonly approvalHoldMs: number;
   private readonly now: () => number;
@@ -155,9 +156,9 @@ export class ClaudeCollector extends WatchedCollector {
     this.approvalHoldMs = options.approvalHoldMs ?? defaultApprovalHoldSeconds * 1000;
     this.now = options.now ?? Date.now;
   }
-  private activeHookOverride(nativeId: string, now = this.now()): { status: SessionStatus; at: number; message?: string } | undefined {
+  private activeHookOverride(nativeId: string, now = this.now()): { status: SessionStatus; at: number; message?: string; event: string } | undefined {
     const hook = this.hookOverrides.get(nativeId);
-    if (hook?.status === 'needs_input' && now - hook.at > this.approvalHoldMs + 60_000) {
+    if (hook?.status === 'needs_input' && hook.event === 'PermissionRequest' && now - hook.at > this.approvalHoldMs + 60_000) {
       this.hookOverrides.delete(nativeId);
       return undefined;
     }
@@ -176,6 +177,7 @@ export class ClaudeCollector extends WatchedCollector {
       status,
       at: now,
       message: status === 'error' ? failureMessage : payload.message,
+      event: payload.hook_event_name,
     });
     const existing = this.sessions.get(`claude-code:${payload.session_id}`);
     if (existing) {
@@ -234,7 +236,7 @@ export class ClaudeCollector extends WatchedCollector {
     const session = super.refreshSession(parsed, mtimeMs, now);
     const hook = this.activeHookOverride(session.nativeId, now);
     if (!hook) return session;
-    const override = claudeHookOverride(mtimeMs, hook.status, hook.at, now, this.approvalHoldMs);
+    const override = claudeHookOverride(mtimeMs, hook.status, hook.at, now, this.approvalHoldMs, hook.event);
     if (!override) {
       this.hookOverrides.delete(session.nativeId);
       return session;
