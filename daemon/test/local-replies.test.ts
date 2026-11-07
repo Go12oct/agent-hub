@@ -7,10 +7,29 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
 import {
-  buildReplyCommand, LocalReplyRunner, ReplyBusyError, ReplyFailedError, type ReplyAgent,
+  buildReplyCommand, cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError,
+  warnLocalReplyFailure, type CommandRunner, type ReplyAgent,
 } from '../src/local-replies';
 
 const text = 'Run the tests without changing permissions';
+
+describe('reply error messages', () => {
+  it('removes hook/model warnings and keeps the final Error line', () => {
+    const stderr = [
+      'Error: That session is running in the background (b1c5c281). Run `claude attach b1c5c281` to open it, or `claude stop b1c5c281` first to resume it here. Add --fork-session to branch off a copy instead.',
+      'SessionEnd hook [python3 /tmp/hook.py] failed: Python was not found',
+      "Warning: Claude Code doesn't recognize the model 'unknown'.",
+      '[claude-code:unrecognized_model] unsupported model',
+    ].join('\n');
+    expect(cleanReplyError(stderr)).toBe('That session is running in the background (b1c5c281). Run `claude attach b1c5c281` to open it, or `claude stop b1c5c281` first to resume it here. Add --fork-session to branch off a copy instead.');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      warnLocalReplyFailure('claude-code', 'claude-code:session', 'line one\nline two');
+      expect(warn).toHaveBeenCalledWith('Local reply failed: claude-code claude-code:session: line one line two');
+    } finally { warn.mockRestore(); }
+  });
+});
 
 const commandCases: Array<{
   agent: ReplyAgent;
@@ -83,6 +102,21 @@ function fakeChild(): ChildProcess {
   }) as unknown as ChildProcess;
 }
 
+function backgroundChild(output: string, exitCode: number): ChildProcess {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 1234,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+  queueMicrotask(() => {
+    if (output) child.stdout.write(output);
+    child.emit('close', exitCode);
+  });
+  return child as unknown as ChildProcess;
+}
+
 const session: AgentSession = {
   id: 'codex:session_123',
   agent: 'codex',
@@ -107,8 +141,148 @@ function createRunner(child: ChildProcess, options: { startupMs?: number; timeou
   return { runner, spawnProcess };
 }
 
+function claudeSession(nativeId = 'claude-session'): AgentSession {
+  return {
+    ...session,
+    id: `claude-code:${nativeId}`,
+    agent: 'claude-code',
+    nativeId,
+    canReply: true,
+  };
+}
+
 describe('LocalReplyRunner', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('uses the existing -p reply path when the Claude session is not backgrounded', async () => {
+    const calls: string[][] = [];
+    const commandRunner: CommandRunner = async (_executable, args) => {
+      calls.push(args);
+      return { stdout: '[]', stderr: '', exitCode: 0 };
+    };
+    const spawnProcess = vi.fn((_executable: string, _args: string[]) => backgroundChild('', 0));
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner,
+      spawn: spawnProcess as unknown as typeof spawn,
+      startupMs: 1,
+    });
+    await runner.send(claudeSession(), text);
+    expect(calls).toEqual([['agents', '--json']]);
+    expect(spawnProcess.mock.calls[0]?.[1]).toEqual(['--resume', 'claude-session', '-p', text]);
+  });
+
+  it('falls back to the existing -p path if Claude agents output is unavailable', async () => {
+    const spawnProcess = vi.fn((_executable: string, _args: string[]) => backgroundChild('', 0));
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner: async () => { throw new Error('agents unavailable'); },
+      spawn: spawnProcess as unknown as typeof spawn,
+      startupMs: 1,
+    });
+    await runner.send(claudeSession(), text);
+    expect(spawnProcess.mock.calls[0]?.[1]).toEqual(['--resume', 'claude-session', '-p', text]);
+  });
+
+  it('rejects a busy background Claude session', async () => {
+    const spawnProcess = vi.fn();
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner: async () => ({
+        stdout: JSON.stringify([{ id: 'short-id', sessionId: 'claude-session', status: 'running' }]),
+        stderr: '',
+        exitCode: 0,
+      }),
+      spawn: spawnProcess as unknown as typeof spawn,
+    });
+    await expect(runner.send(claudeSession(), text)).rejects.toMatchObject({
+      name: 'ReplyBusyError',
+      message: 'Claude is still working on this chat in the background. Send again when it finishes.',
+    });
+    expect(spawnProcess).not.toHaveBeenCalled();
+  });
+
+  it('does not pass phone text through a Windows shell shim for background Claude', async () => {
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude.cmd' },
+      resolve: async () => undefined,
+      commandRunner: async () => ({
+        stdout: JSON.stringify([{ id: 'short-id', sessionId: 'claude-session', status: 'idle' }]),
+        stderr: '',
+        exitCode: 0,
+      }),
+    });
+    await expect(runner.send(claudeSession(), text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: 'Replying to background Claude chats needs the claude.exe install.',
+    });
+  });
+
+  it('stops, polls, and resumes an idle background Claude session', async () => {
+    const results = [
+      JSON.stringify([{ id: 'short-id', sessionId: 'claude-session', status: 'idle' }]),
+      JSON.stringify([{ id: 'short-id', sessionId: 'claude-session', status: 'idle' }]),
+      '[]',
+    ];
+    const calls: string[][] = [];
+    const commandRunner: CommandRunner = async (_executable, args) => {
+      calls.push(args);
+      return args[0] === 'agents'
+        ? { stdout: results.shift()!, stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 };
+    };
+    const spawnProcess = vi.fn((_executable: string, _args: string[]) => backgroundChild('note: woke session short-id\nbackgrounded · short-id', 0));
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner,
+      sleep: async () => {},
+      spawn: spawnProcess as unknown as typeof spawn,
+    });
+    await runner.send(claudeSession(), text);
+    expect(calls).toEqual([
+      ['agents', '--json'],
+      ['stop', 'short-id'],
+      ['agents', '--json'],
+      ['agents', '--json'],
+    ]);
+    expect(spawnProcess).toHaveBeenCalledWith('claude', ['--bg', '--resume', 'claude-session', text], expect.objectContaining({ shell: false, cwd: process.cwd() }));
+  });
+
+  it('stops a mistakenly started Claude copy and reports the retryable failure', async () => {
+    const results = [
+      JSON.stringify([{ id: 'short-id', sessionId: 'claude-session', status: 'idle' }]),
+      '[]',
+    ];
+    const calls: string[][] = [];
+    const commandRunner: CommandRunner = async (_executable, args) => {
+      calls.push(args);
+      return args[0] === 'agents'
+        ? { stdout: results.shift()!, stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 };
+    };
+    const spawnProcess = vi.fn(() => backgroundChild('note: session short-id is already running in the background, so this started a copy as copy-id', 1));
+    const runner = new LocalReplyRunner({
+      commands: { 'claude-code': 'claude' },
+      resolve: async () => undefined,
+      commandRunner,
+      sleep: async () => {},
+      spawn: spawnProcess as unknown as typeof spawn,
+    });
+    await expect(runner.send(claudeSession(), text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: 'Claude restarted this chat as a copy; send again in a few seconds.',
+    });
+    expect(calls).toEqual([
+      ['agents', '--json'],
+      ['stop', 'short-id'],
+      ['agents', '--json'],
+      ['stop', 'copy-id'],
+    ]);
+  });
 
   it('only allows Antigravity replies for chats in the agy CLI store', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-antigravity-home-'));
@@ -233,6 +407,20 @@ describe('LocalReplyRunner', () => {
     expect(runner.failure(session.id)).toBeUndefined();
     secondChild.emit('close', 0);
     await second;
+  });
+
+  it('stores a cleaned late failure for the session feed', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const { runner } = createRunner(child, { startupMs: 1 });
+    await runner.init();
+    const sending = runner.send(session, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1);
+    await sending;
+    (child.stderr as PassThrough).write('Error: Claude could not resume\nSessionEnd hook [python3 /hook.py] failed: Python was not found');
+    child.emit('close', 1);
+    expect(runner.failure(session.id)?.error).toBe('Claude could not resume');
   });
 
   it('handles stdin EPIPE errors and records a late failure', async () => {

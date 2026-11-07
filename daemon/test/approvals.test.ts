@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -6,7 +7,7 @@ import type { AgentSession } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
 import { ApprovalBroker, hookDecisionBody, summarizeToolRequest } from '../src/approvals';
 import { approvalHookTimeout, installClaudeHooks } from '../src/claude-hooks';
-import { NtfyNotifier, ntfyMessage, sessionDeepLink } from '../src/notifications';
+import { NtfyNotifier, ntfyMessage, sessionDeepLink, sessionNotificationSequence } from '../src/notifications';
 import { createHub } from '../src/server';
 
 class FakeCollector implements Collector {
@@ -37,6 +38,12 @@ describe('approval broker', () => {
     expect(summarizeToolRequest('Bash', { command: 'git push', description: 'Push' })).toEqual({ summary: 'Run: git push', detail: 'Push' });
     expect(summarizeToolRequest('Edit', { file_path: '/src/a.ts' }).summary).toBe('Edit /src/a.ts');
     expect(summarizeToolRequest('mcp__db__query', { sql: 'select 1' })).toEqual({ summary: 'Use mcp__db__query', detail: '{"sql":"select 1"}' });
+    expect(summarizeToolRequest('AskUserQuestion', {
+      questions: [{ question: 'Which framework?', header: 'Framework', options: [{ label: 'React', description: 'UI' }] }],
+    })).toEqual({
+      summary: 'Claude has a question: Which framework?',
+      questions: [{ question: 'Which framework?', header: 'Framework', options: [{ label: 'React', description: 'UI' }] }],
+    });
   });
 
   it('resolves allow and deny, rejects stale ids, holds parallel requests, and times out', async () => {
@@ -49,7 +56,7 @@ describe('approval broker', () => {
       expect(broker.pending('s1').map((item) => item.summary)).toEqual(['Run: ls']);
       expect(broker.decide('s1', 'wrong-id', 'allow')).toBe('stale');
       expect(broker.decide('s1', first.approval.id, 'allow')).toBe('ok');
-      await expect(first.outcome).resolves.toBe('allow');
+      await expect(first.outcome).resolves.toMatchObject({ outcome: 'allow', toolName: 'Bash', input: { command: 'ls' } });
       expect(broker.pending('s1')).toEqual([]);
       expect(broker.decide('s1', undefined, 'allow')).toBe('none');
 
@@ -57,25 +64,30 @@ describe('approval broker', () => {
       const write = broker.hold('s1', 'Write', { file_path: 'result.txt' }, 1000);
       expect(broker.pending('s1')).toHaveLength(2);
       expect(broker.decide('s1', write.approval.id, 'deny')).toBe('ok');
-      await expect(write.outcome).resolves.toBe('deny');
+      await expect(write.outcome).resolves.toMatchObject({ outcome: 'deny' });
       expect(broker.pending('s1').map((item) => item.toolName)).toEqual(['Bash']);
       broker.cancelSession('s1', { name: 'Edit' });
       expect(broker.pending('s1')).toHaveLength(1);
       const second = broker.hold('s1', 'Bash', { command: 'git status' }, 1000);
       broker.cancelSession('s1', { name: 'Bash', input: { command: 'git status' } });
-      await expect(second.outcome).resolves.toBe('cancelled');
+      await expect(second.outcome).resolves.toMatchObject({ outcome: 'cancelled' });
       expect(broker.pending('s1').map((item) => item.summary)).toEqual(['Run: npm test']);
       const third = broker.hold('s1', 'Bash', { command: 'git log' }, 1000);
       broker.cancelSession('s1', { name: 'Bash' });
       expect(broker.pending('s1')).toHaveLength(2);
       broker.cancelSession('s1', { name: 'Bash', input: { command: 'npm test' } });
-      await expect(bash.outcome).resolves.toBe('cancelled');
+      await expect(bash.outcome).resolves.toMatchObject({ outcome: 'cancelled' });
       broker.cancelSession('s1', { name: 'Bash' });
-      await expect(third.outcome).resolves.toBe('cancelled');
+      await expect(third.outcome).resolves.toMatchObject({ outcome: 'cancelled' });
 
       const timed = broker.hold('s2', 'Bash', {}, 1000);
       vi.advanceTimersByTime(1001);
-      await expect(timed.outcome).resolves.toBe('timeout');
+      await expect(timed.outcome).resolves.toMatchObject({ outcome: 'timeout' });
+      const input = { questions: [{ question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }] };
+      const question = broker.hold('s3', 'AskUserQuestion', input, 1000);
+      const answers = { 'Which?': 'A, B' };
+      broker.decide('s3', question.approval.id, 'allow', answers);
+      await expect(question.outcome).resolves.toMatchObject({ outcome: 'allow', toolName: 'AskUserQuestion', input, answers });
       expect(changes.filter((id) => id === 's1').length).toBeGreaterThanOrEqual(6);
     } finally { vi.useRealTimers(); }
   });
@@ -85,6 +97,20 @@ describe('approval broker', () => {
     expect(hookDecisionBody('deny')).toMatchObject({ hookSpecificOutput: { decision: { behavior: 'deny', message: expect.stringContaining('denied') } } });
     expect(hookDecisionBody('timeout')).toEqual({});
     expect(hookDecisionBody('cancelled')).toEqual({});
+    const questionInput = { questions: [{ question: 'Which?', options: [{ label: 'A' }] }] };
+    expect(hookDecisionBody('allow', questionInput, { 'Which?': 'A' })).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'allow', updatedInput: { ...questionInput, answers: { 'Which?': 'A' } } },
+      },
+    });
+    const planInput = { plan: 'Ship it', planFilePath: '/tmp/plan.md' };
+    expect(hookDecisionBody('allow', planInput)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'allow', updatedInput: planInput },
+      },
+    });
   });
 });
 
@@ -112,6 +138,14 @@ describe('ntfy notifications', () => {
     expect(ntfyMessage(session({ approval }))).toMatchObject({ title: 'Claude Code wants permission — repo', priority: 'high' });
     expect(ntfyMessage(session({ approval })).body).not.toContain('rm -rf node_modules');
     expect(ntfyMessage(session({ approval })).body).toContain('Bash');
+    expect(ntfyMessage(session({ approval })).body).toContain('Claude Code wants to use');
+    const question = {
+      ...approval,
+      toolName: 'AskUserQuestion',
+      questions: [{ question: 'Which framework?', options: [{ label: 'React' }] }],
+    };
+    expect(ntfyMessage(session({ agent: 'codex', approval: question })).title).toBe('Codex has a question — repo');
+    expect(ntfyMessage(session({ approval: question })).body).toBe('Which framework?');
     expect(ntfyMessage(session({ status: 'done' })).title).toBe('Claude Code finished — repo');
     expect(ntfyMessage(session({ status: 'error' })).title).toBe('Claude Code hit an error — repo');
   });
@@ -136,6 +170,24 @@ describe('ntfy notifications', () => {
     expect(String((fetchImpl.mock.calls[2] as unknown as [string, RequestInit])[1].body)).toContain('Write');
     await notifier.update(session({ approval, approvals: [approval, write] }));
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses sequence ids and clears disappeared approvals and needs-you alerts without throttling', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    const approval = { id: 'ap1', toolName: 'Bash', summary: 'Run: ls', requestedAt: new Date().toISOString() };
+    const sessionId = 'claude-code:x';
+    await notifier.update(session({ status: 'needs_input', id: sessionId }));
+    await notifier.update(session({ status: 'needs_input', id: sessionId, approval, approvals: [approval] }));
+    await notifier.update(session({ status: 'working', id: sessionId, approvals: [] }));
+
+    const calls = fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls).toHaveLength(4);
+    expect(calls[0]![1].headers).toMatchObject({ 'X-Sequence-ID': sessionNotificationSequence(sessionId) });
+    expect(calls[1]![1].headers).toMatchObject({ 'X-Sequence-ID': 'ah-ap1' });
+    expect(calls[2]).toEqual([expect.stringMatching(/\/ah-ap1\/clear$/), expect.objectContaining({ method: 'PUT' })]);
+    expect(calls[3]).toEqual([expect.stringMatching(/\/ah-s-[a-f0-9]{32}\/clear$/), expect.objectContaining({ method: 'PUT' })]);
+    expect(sessionNotificationSequence(sessionId)).toBe(`ah-s-${createHash('sha1').update(sessionId).digest('hex').slice(0, 32)}`);
   });
 
   it('suppresses old first-seen sessions unless they have a pending approval', async () => {
@@ -183,7 +235,7 @@ describe('Claude approvals over HTTP', () => {
       });
       expect(decided.statusCode).toBe(204);
       expect((await hook).statusCode).toBe(200);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally {
       await runtime.close();
       vi.unstubAllGlobals();
@@ -213,6 +265,100 @@ describe('Claude approvals over HTTP', () => {
       const resumed = (after.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1');
       expect(resumed?.approval).toBeUndefined();
       expect(resumed?.status).toBe('working');
+    } finally { await runtime.close(); }
+  });
+
+  it('validates AskUserQuestion answers and returns them with the original input', async () => {
+    const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
+    const toolInput = {
+      questions: [
+        { question: 'Which framework?', header: 'Framework', options: [{ label: 'React' }, { label: 'Vue' }], multiSelect: true },
+        { question: 'Ship today?', options: [{ label: 'Yes' }, { label: 'No' }] },
+      ],
+    };
+    try {
+      const hook = runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/claude?token=test-token',
+        payload: { ...permissionRequest, tool_name: 'AskUserQuestion', tool_input: toolInput },
+      });
+      await vi.waitFor(() => expect(runtime.sessions.get('claude-code:perm-1')?.status).toBe('needs_input'));
+      const list = await runtime.app.inject({ url: '/api/sessions', headers: auth });
+      const shown = (list.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1');
+      expect(shown?.approval).toMatchObject({
+        toolName: 'AskUserQuestion',
+        summary: 'Claude has a question: Which framework?',
+        questions: toolInput.questions,
+      });
+
+      const invalid = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/claude-code:perm-1/approval',
+        headers: auth,
+        payload: { decision: 'allow', approvalId: shown?.approval?.id, answers: { 'Which framework?': 'React' } },
+      });
+      expect(invalid.statusCode).toBe(400);
+      const malformed = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/claude-code:perm-1/approval',
+        headers: auth,
+        payload: { decision: 'allow', approvalId: shown?.approval?.id, answers: { 'Which framework?': ['React'] } },
+      });
+      expect(malformed.statusCode).toBe(400);
+
+      const answers = { 'Which framework?': 'React, Vue', 'Ship today?': 'Yes' };
+      const decided = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/claude-code:perm-1/approval',
+        headers: auth,
+        payload: { decision: 'allow', approvalId: shown?.approval?.id, answers },
+      });
+      expect(decided.statusCode).toBe(204);
+      expect((await hook).json()).toEqual({
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision: { behavior: 'allow', updatedInput: { ...toolInput, answers } },
+        },
+      });
+    } finally { await runtime.close(); }
+  });
+
+  it('cancels a held approval when Claude reports PostToolUse', async () => {
+    const send = vi.fn(async () => {});
+    const replyRunner = {
+      supports: () => true,
+      isRunning: () => false,
+      failure: () => undefined,
+      send,
+    };
+    const runtime = createHub(config, { collectors: [new FakeCollector()], replyRunner, staticDir: '/nonexistent/agent-hub-web' });
+    try {
+      const hook = runtime.app.inject({ method: 'POST', url: '/hooks/claude?token=test-token', payload: permissionRequest });
+      await vi.waitFor(() => expect(runtime.sessions.get('claude-code:perm-1')?.status).toBe('needs_input'));
+      const blockedReply = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/claude-code:perm-1/messages',
+        headers: auth,
+        payload: { text: 'Continue' },
+      });
+      expect(blockedReply.statusCode).toBe(409);
+      expect(blockedReply.json()).toEqual({ error: 'Answer the request in this chat first.' });
+      expect(send).not.toHaveBeenCalled();
+      const completed = await runtime.app.inject({
+        method: 'POST',
+        url: '/hooks/claude?token=test-token',
+        payload: {
+          session_id: 'perm-1',
+          hook_event_name: 'PostToolUse',
+          cwd: permissionRequest.cwd,
+          tool_name: permissionRequest.tool_name,
+          tool_input: permissionRequest.tool_input,
+        },
+      });
+      expect(completed.statusCode).toBe(200);
+      expect((await hook).json()).toEqual({});
+      const list = await runtime.app.inject({ url: '/api/sessions', headers: auth });
+      expect((list.json() as AgentSession[]).find((item) => item.id === 'claude-code:perm-1')?.approval).toBeUndefined();
     } finally { await runtime.close(); }
   });
 
@@ -358,7 +504,7 @@ describe('Codex approvals over HTTP', () => {
       });
       expect(decided.statusCode).toBe(204);
       expect((await hook).json()).toEqual(hookDecisionBody('allow'));
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally {
       await runtime.close();
       vi.unstubAllGlobals();

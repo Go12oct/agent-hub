@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -288,6 +288,7 @@ describe('authenticated HTTP API', () => {
     const collector = new FakeCollector();
     const replyRunner = new FakeLocalReplyRunner();
     replyRunner.sendError = new ReplyFailedError('', "Couldn't find this chat's project folder");
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const runtime = createHub(config, {
       collectors: [collector],
       replyRunner,
@@ -303,6 +304,56 @@ describe('authenticated HTTP API', () => {
       });
       expect(response.statusCode).toBe(502);
       expect(response.json()).toEqual({ error: "Couldn't find this chat's project folder" });
+      expect(warn).toHaveBeenCalledWith("Local reply failed: codex codex:session-123: Couldn't find this chat's project folder");
+    } finally { await runtime.close(); warn.mockRestore(); }
+  });
+
+  it('cleans hook failure noise from local reply errors returned to the phone', async () => {
+    const collector = new FakeCollector();
+    const replyRunner = new FakeLocalReplyRunner();
+    replyRunner.sendError = new ReplyFailedError(
+      '',
+      'Error: That session is running in the background (b1c5c281).\nSessionEnd hook [python3 /hook.py] failed: Python was not found',
+    );
+    const runtime = createHub(config, { collectors: [collector], replyRunner, staticDir: '/nonexistent/agent-hub-web' });
+    collector.emit?.(testSession('codex', 'session-123'));
+    try {
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/codex:session-123/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Run the tests' },
+      });
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: 'That session is running in the background (b1c5c281).' });
+    } finally { await runtime.close(); }
+  });
+
+  it('returns the custom busy message for a background Claude reply as 409', async () => {
+    const collector = new FakeCollector();
+    const replyRunner: ReplyRunner = {
+      supports: (agent) => agent === 'claude-code',
+      isRunning: () => false,
+      failure: () => undefined,
+      send: async () => { throw new ReplyBusyError('Claude is still working on this chat in the background. Send again when it finishes.'); },
+    };
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.(testSession('claude-code', 'claude-session'));
+    try {
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/claude-code:claude-session/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Continue' },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({
+        error: 'Claude is still working on this chat in the background. Send again when it finishes.',
+      });
     } finally { await runtime.close(); }
   });
 

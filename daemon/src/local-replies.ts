@@ -31,9 +31,64 @@ export interface ReplyRunner {
   send(session: AgentSession, text: string): Promise<void>;
 }
 
+export interface CommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type CommandRunner = (
+  executable: string,
+  args: string[],
+  options: { cwd?: string; timeoutMs: number },
+) => Promise<CommandResult>;
+
+interface BackgroundClaudeAgent {
+  id: string;
+  sessionId: string;
+  status?: string;
+}
+
+function runCommandFile(executable: string, args: string[], options: { cwd?: string; timeoutMs: number }): Promise<CommandResult> {
+  return new Promise((resolve, reject) => {
+    execFile(executable, args, {
+      cwd: options.cwd,
+      timeout: options.timeoutMs,
+      encoding: 'utf8',
+      windowsHide: true,
+      shell: process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(executable),
+    }, (error, stdout, stderr) => {
+      const result = { stdout: String(stdout || ''), stderr: String(stderr || ''), exitCode: 0 };
+      if (error) {
+        Object.assign(error, result);
+        reject(error);
+      } else resolve(result);
+    });
+  });
+}
+
+function parseBackgroundAgents(output: string): BackgroundClaudeAgent[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.flatMap((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const agent = value as Record<string, unknown>;
+      if (typeof agent.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(agent.id) || typeof agent.sessionId !== 'string') return [];
+      return [{
+        id: agent.id,
+        sessionId: agent.sessionId,
+        ...(typeof agent.status === 'string' ? { status: agent.status } : {}),
+      }];
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export class ReplyBusyError extends Error {
-  constructor() {
-    super('That agent is still working on your last message');
+  constructor(message = 'That agent is still working on your last message') {
+    super(message);
     this.name = 'ReplyBusyError';
   }
 }
@@ -43,6 +98,20 @@ export class ReplyFailedError extends Error {
     super(message);
     this.name = 'ReplyFailedError';
   }
+}
+
+export function cleanReplyError(stderr: string): string {
+  const lines = stderr.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !/hook \[.*\] failed:/i.test(line))
+    .filter((line) => !/doesn't recognize the model|\[claude-code:unrecognized_model\]/i.test(line));
+  const errorLine = lines.filter((line) => /^Error:\s*/i.test(line)).at(-1);
+  return (errorLine ? errorLine.replace(/^Error:\s*/i, '') : lines.at(-1) || '').slice(0, 300);
+}
+
+export function warnLocalReplyFailure(agent: string, sessionId: string, message: string): void {
+  console.warn(`Local reply failed: ${agent} ${sessionId}: ${message.replace(/[\r\n]+/g, ' ').slice(0, 300)}`);
 }
 
 const commandNames: Record<ReplyAgent, string> = {
@@ -153,6 +222,8 @@ export class LocalReplyRunner implements ReplyRunner {
   private readonly commands: Partial<Record<ReplyAgent, string>>;
   private readonly timeoutMs: number;
   private readonly startupMs: number;
+  private readonly commandRunner: CommandRunner;
+  private readonly sleep: (ms: number) => Promise<void>;
   private readonly executables = new Map<ReplyAgent, string>();
   private readonly active = new Map<string, ActiveReply>();
   private readonly lastFailure = new Map<string, ReplyFailure>();
@@ -162,12 +233,16 @@ export class LocalReplyRunner implements ReplyRunner {
     spawn?: typeof spawn;
     resolve?: typeof resolveExecutable;
     commands?: Partial<Record<ReplyAgent, string>>;
+    commandRunner?: CommandRunner;
+    sleep?: (ms: number) => Promise<void>;
     timeoutMs?: number;
     startupMs?: number;
   } = {}) {
     this.spawnProcess = options.spawn || spawn;
     this.resolve = options.resolve || resolveExecutable;
     this.commands = options.commands || {};
+    this.commandRunner = options.commandRunner || runCommandFile;
+    this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.timeoutMs = options.timeoutMs ?? 20 * 60_000;
     this.startupMs = options.startupMs ?? 3_000;
   }
@@ -224,6 +299,18 @@ export class LocalReplyRunner implements ReplyRunner {
       throw new ReplyFailedError('', `Failed to start ${session.agent}`);
     }
 
+    if (agent === 'claude-code') {
+      const agents = await this.backgroundClaudeAgents(executable, session.cwd);
+      const background = agents?.find((item) => item.sessionId === session.nativeId);
+      if (background) {
+        if (background.status !== 'idle') {
+          throw new ReplyBusyError('Claude is still working on this chat in the background. Send again when it finishes.');
+        }
+        await this.resumeBackgroundClaude(executable, background, session, text);
+        return;
+      }
+    }
+
     const command = buildReplyCommand(agent, session.nativeId, text, session.cwd, executable);
     let child: ChildProcess;
     try {
@@ -261,18 +348,20 @@ export class LocalReplyRunner implements ReplyRunner {
         if (stopGraceTimer) clearTimeout(stopGraceTimer);
         if (this.active.get(session.id)?.child === child) this.active.delete(session.id);
         const failed = Boolean(error || pendingFailure) || code !== 0;
-        const failureMessage = error
+        const rawFailureMessage = error
           ? stderrTail || error.message || `Failed to start ${agentLabels[agent]}`
           : pendingFailure || stderrTail || `${agentLabels[agent]} stopped with exit code ${code ?? 'unknown'}`;
+        const failureMessage = cleanReplyError(stderrTail || rawFailureMessage) || rawFailureMessage;
         if (startupSettled && failed) {
           this.lastFailure.set(session.id, { error: failureMessage, at: new Date().toISOString() });
+          warnLocalReplyFailure(session.agent, session.id, failureMessage);
         }
         this.notify(session.id);
         console.log(`Local reply exited: ${session.agent} ${session.id} (${failed ? 'error' : code ?? 'unknown'})`);
 
         if (!startupSettled) {
           startupSettled = true;
-          if (failed) reject(new ReplyFailedError(stderrTail, failureMessage));
+          if (failed) reject(new ReplyFailedError(cleanReplyError(stderrTail) || stderrTail, failureMessage));
           else resolve();
         }
       };
@@ -329,6 +418,107 @@ export class LocalReplyRunner implements ReplyRunner {
       } catch (error) {
         pendingFailure ||= error instanceof Error ? error.message : String(error);
       }
+    });
+  }
+
+  private async backgroundClaudeAgents(executable: string, cwd?: string, timeoutMs = 10_000): Promise<BackgroundClaudeAgent[] | undefined> {
+    try {
+      const result = await this.commandRunner(executable, ['agents', '--json'], { cwd, timeoutMs });
+      if (result.exitCode !== 0) return undefined;
+      return parseBackgroundAgents(result.stdout);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async resumeBackgroundClaude(
+    executable: string,
+    background: BackgroundClaudeAgent,
+    session: AgentSession,
+    text: string,
+  ): Promise<void> {
+    if (/\.(?:cmd|bat)$/i.test(executable)) {
+      throw this.backgroundFailure(session, 'Replying to background Claude chats needs the claude.exe install.');
+    }
+    try {
+      await this.commandRunner(executable, ['stop', background.id], { cwd: session.cwd, timeoutMs: 10_000 });
+    } catch {}
+
+    const deadline = Date.now() + 15_000;
+    let paused = false;
+    while (Date.now() <= deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const agents = await this.backgroundClaudeAgents(executable, session.cwd, Math.min(10_000, remaining));
+      if (agents && !agents.some((item) => item.sessionId === session.nativeId)) {
+        paused = true;
+        break;
+      }
+      const wait = deadline - Date.now();
+      if (wait <= 0) break;
+      await this.sleep(Math.min(1000, wait));
+    }
+    if (!paused) throw this.backgroundFailure(session, "Couldn't pause the background Claude session. Try again.");
+
+    let result: CommandResult;
+    try {
+      result = await this.runBackgroundReply(executable, session, text);
+    } catch (error) {
+      throw this.backgroundFailure(session, error instanceof Error ? error.message : String(error));
+    }
+    const output = `${result.stdout}\n${result.stderr}`;
+    const copyId = output.match(/started a copy as\s+([A-Za-z0-9._-]+)/i)?.[1];
+    if (/started a copy/i.test(output)) {
+      if (copyId) {
+        try {
+          await this.commandRunner(executable, ['stop', copyId], { cwd: session.cwd, timeoutMs: 10_000 });
+        } catch {}
+      }
+      throw this.backgroundFailure(session, 'Claude restarted this chat as a copy; send again in a few seconds.');
+    }
+    if (result.exitCode !== 0 || !/backgrounded/i.test(output)) {
+      const message = cleanReplyError(`${result.stderr}\n${result.stdout}`) || `Claude background reply failed with exit code ${result.exitCode}`;
+      throw this.backgroundFailure(session, message);
+    }
+    this.lastFailure.delete(session.id);
+    this.notify(session.id);
+  }
+
+  private backgroundFailure(session: AgentSession, rawMessage: string): ReplyFailedError {
+    const message = cleanReplyError(rawMessage) || rawMessage;
+    this.lastFailure.set(session.id, { error: message, at: new Date().toISOString() });
+    this.notify(session.id);
+    return new ReplyFailedError(message, message);
+  }
+
+  private runBackgroundReply(executable: string, session: AgentSession, text: string): Promise<CommandResult> {
+    return new Promise((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const finish = (error?: Error, code?: number | null) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(new ReplyFailedError(cleanReplyError(stderr || error.message), cleanReplyError(stderr || error.message) || error.message));
+        else resolve({ stdout, stderr, exitCode: code ?? 1 });
+      };
+      let child: ChildProcess;
+      try {
+        child = this.spawnProcess(executable, ['--bg', '--resume', session.nativeId, text], {
+          cwd: session.cwd,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (error) {
+        const message = cleanReplyError(error instanceof Error ? error.message : String(error));
+        reject(new ReplyFailedError(message, message || `Failed to start ${agentLabels['claude-code']}`));
+        return;
+      }
+      child.stdout?.on('data', (chunk: Buffer | string) => { stdout = `${stdout}${chunk.toString()}`.slice(-10_000); });
+      child.stderr?.on('data', (chunk: Buffer | string) => { stderr = `${stderr}${chunk.toString()}`.slice(-10_000); });
+      child.once('error', (error) => finish(error));
+      child.once('close', (code) => finish(undefined, code));
     });
   }
 

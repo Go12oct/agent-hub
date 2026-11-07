@@ -7,6 +7,12 @@ export interface PendingApproval {
   toolName: string;
   summary: string;
   detail?: string;
+  questions?: Array<{
+    question: string;
+    header?: string;
+    multiSelect?: boolean;
+    options: Array<{ label: string; description?: string }>;
+  }>;
   requestedAt: string;
 }
 

@@ -5,7 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Agent Hub',
   webDir: 'app/dist',
   server: { androidScheme: 'http', cleartext: true },
-  android: { adjustMarginsForEdgeToEdge: 'force' },
+  android: { adjustMarginsForEdgeToEdge: 'disable' },
 };
 
 export default config;

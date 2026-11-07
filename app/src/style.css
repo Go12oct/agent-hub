@@ -210,6 +210,12 @@ a { color: var(--accent); }
 .approval-head { display: flex; align-items: center; gap: 8px; color: var(--needs); font-weight: 650; font-size: 15px; }
 .approval-summary { display: block; margin: 10px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .approval-detail { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.approval-question { margin-top: 12px; font-size: 14px; }
+.approval-question p { margin: 6px 0 0; line-height: 1.4; }
+.approval-options { display: grid; gap: 7px; margin-top: 8px; }
+.approval-option { align-items: flex-start; min-height: 44px; padding: 8px 12px; flex-direction: column; text-align: left; font-size: 14px; }
+.approval-option.selected { border: 1px solid var(--working); background: rgba(90, 204, 135, .12); }
+.approval-option small { color: var(--muted); font-weight: 400; }
 .approval-actions { display: flex; gap: 10px; margin-top: 12px; }
 .approval-actions button { flex: 1; min-height: 46px; font-size: 16px; }
 .approval-actions .allow { background: var(--working); color: #062b14; }

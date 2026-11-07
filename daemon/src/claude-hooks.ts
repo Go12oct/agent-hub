@@ -5,7 +5,7 @@ import path from 'node:path';
 import { configDirectory, loadConfig } from './config.js';
 import type { HubConfig } from './config.js';
 
-const events = ['UserPromptSubmit', 'PreToolUse', 'SubagentStart', 'Notification', 'Stop', 'PermissionRequest', 'StopFailure', 'SessionEnd'];
+const events = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionDenied', 'SubagentStart', 'Notification', 'Stop', 'PermissionRequest', 'StopFailure', 'SessionEnd'];
 export const defaultApprovalHoldSeconds = 300;
 
 export function approvalHookTimeout(config: Pick<HubConfig, 'approvals'>): number {

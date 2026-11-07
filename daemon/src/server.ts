@@ -13,7 +13,7 @@ import { AntigravityCollector } from './collectors/antigravity.js';
 import { DevinCollector } from './collectors/devin.js';
 import { CodexCloudCollector } from './collectors/codex-cloud.js';
 import type { HubConfig } from './config.js';
-import { LocalReplyRunner, ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner } from './local-replies.js';
+import { cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError, warnLocalReplyFailure, type ReplyAgent, type ReplyRunner } from './local-replies.js';
 import { NtfyNotifier } from './notifications.js';
 import { ApprovalBroker, hookDecisionBody, type ApprovalDecision } from './approvals.js';
 import { defaultApprovalHoldSeconds } from './claude-hooks.js';
@@ -202,6 +202,9 @@ export function createHub(
   app.post<{ Params: { id: string }; Body: { text?: unknown } }>('/api/sessions/:id/messages', async (request, reply) => {
     const session = sessions.get(request.params.id);
     if (!session) return reply.code(404).send({ error: 'Session not found' });
+    if (approvals.pending(session.id).length) {
+      return reply.code(409).send({ error: 'Answer the request in this chat first.' });
+    }
     const collector = collectors.find((item) => item.name === session.agent);
     const isDevinReply = session.agent === 'devin' && Boolean(collector?.sendMessage);
     const isLocalReply = isReplyAgent(session.agent) && Boolean(
@@ -226,11 +229,13 @@ export function createHub(
       return reply.code(202).send({ ok: true });
     } catch (error) {
       if (error instanceof ReplyBusyError) {
-        return reply.code(409).send({ error: 'That agent is still working on your last message' });
+        return reply.code(409).send({ error: error.message });
       }
       if (isDevinReply) return reply.code(502).send({ error: 'Failed to send reply' });
-      const message = error instanceof ReplyFailedError ? error.stderrTail || error.message : '';
-      return reply.code(502).send({ error: message || `Failed to start ${agentLabels[session.agent]}` });
+      const rawMessage = error instanceof ReplyFailedError ? error.stderrTail || error.message : error instanceof Error ? error.message : '';
+      const message = cleanReplyError(rawMessage) || `Failed to start ${agentLabels[session.agent]}`;
+      warnLocalReplyFailure(session.agent, session.id, message);
+      return reply.code(502).send({ error: message });
     }
   });
   app.get('/api/pair', async () => ({
@@ -257,15 +262,34 @@ export function createHub(
       eventClients.delete(client);
     });
   });
-  app.post<{ Params: { id: string }; Body: { decision?: unknown; approvalId?: unknown } }>('/api/sessions/:id/approval', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { decision?: unknown; approvalId?: unknown; answers?: unknown } }>('/api/sessions/:id/approval', async (request, reply) => {
     const session = sessions.get(request.params.id);
     if (!session) return reply.code(404).send({ error: 'Session not found' });
     const decision = request.body?.decision;
     if (decision !== 'allow' && decision !== 'deny') {
       return reply.code(400).send({ error: 'decision must be "allow" or "deny"' });
     }
+    let answers: Record<string, string> | undefined;
+    if (request.body.answers !== undefined) {
+      if (!request.body.answers || typeof request.body.answers !== 'object' || Array.isArray(request.body.answers)) {
+        return reply.code(400).send({ error: 'answers must be an object of question text to answer strings' });
+      }
+      const entries = Object.entries(request.body.answers as Record<string, unknown>);
+      if (entries.some(([question, answer]) => !question.trim() || typeof answer !== 'string')) {
+        return reply.code(400).send({ error: 'answers must be an object of question text to answer strings' });
+      }
+      answers = Object.fromEntries(entries) as Record<string, string>;
+    }
     const approvalId = typeof request.body?.approvalId === 'string' ? request.body.approvalId : undefined;
-    const result = approvals.decide(session.id, approvalId, decision as ApprovalDecision);
+    const pending = approvals.pending(session.id);
+    const target = approvalId ? pending.find((item) => item.id === approvalId) : pending[0];
+    if (decision === 'allow' && target?.toolName === 'AskUserQuestion') {
+      const questions = target.questions ?? [];
+      if (!questions.length || questions.some((question) => !answers?.[question.question]?.trim())) {
+        return reply.code(400).send({ error: 'An answer is required for every question' });
+      }
+    }
+    const result = approvals.decide(session.id, approvalId, decision as ApprovalDecision, answers);
     if (result === 'none') return reply.code(409).send({ error: 'That request is no longer waiting. It may have been answered on the PC.' });
     if (result === 'stale') return reply.code(409).send({ error: 'A newer request replaced this one. Check the chat again.' });
     return reply.code(204).send();
@@ -298,7 +322,7 @@ export function createHub(
         : undefined;
       if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
         await applyHook(payload, emit);
-        if (payload.hook_event_name === 'PreToolUse' && toolName) {
+        if (['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(payload.hook_event_name || '') && toolName) {
           approvals.cancelSession(sessionId, { name: toolName, input: toolInput });
         } else if (cancelEvents.includes(payload.hook_event_name || '')) {
           approvals.cancelSession(sessionId);
@@ -308,13 +332,15 @@ export function createHub(
       const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
       reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
       await applyHook(payload, emit);
-      const result = await outcome;
+      const resolution = await outcome;
+      const result = resolution.outcome;
       if (result === 'allow' || result === 'deny') {
         await applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);
       } else if ((result === 'timeout' || result === 'cancelled') && approvals.pending(sessionId).length === 0) {
         await clearNeedsInput(sessionId, emit);
       }
-      return hookDecisionBody(result);
+      const updatedInput = ['AskUserQuestion', 'ExitPlanMode'].includes(resolution.toolName) ? resolution.input : undefined;
+      return hookDecisionBody(result, updatedInput, resolution.answers);
     });
   };
   registerHookHandler(

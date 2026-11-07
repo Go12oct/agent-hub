@@ -4,18 +4,26 @@ import type { PendingApproval } from '@agent-hub/shared';
 export type ApprovalDecision = 'allow' | 'deny';
 export type ApprovalOutcome = ApprovalDecision | 'timeout' | 'cancelled';
 
+export interface ApprovalResolution {
+  outcome: ApprovalOutcome;
+  toolName: string;
+  input: Record<string, unknown>;
+  answers?: Record<string, string>;
+}
+
 interface Held {
   approval: PendingApproval;
   sessionId: string;
+  input: Record<string, unknown>;
   inputKey: string;
-  resolve: (outcome: ApprovalOutcome) => void;
+  resolve: (outcome: ApprovalOutcome, answers?: Record<string, string>) => void;
 }
 
 export function inputKey(toolName: string, input: Record<string, unknown> | undefined): string {
   return `${toolName}\u0000${JSON.stringify(input ?? {})}`;
 }
 
-export function summarizeToolRequest(toolName: string, input: Record<string, unknown> = {}): { summary: string; detail?: string } {
+export function summarizeToolRequest(toolName: string, input: Record<string, unknown> = {}): { summary: string; detail?: string; questions?: PendingApproval['questions'] } {
   const text = (value: unknown) => (typeof value === 'string' ? value : undefined);
   switch (toolName) {
     case 'Bash': {
@@ -30,6 +38,26 @@ export function summarizeToolRequest(toolName: string, input: Record<string, unk
       return { summary: `Fetch ${text(input.url) || 'a URL'}`.slice(0, 280) };
     case 'WebSearch':
       return { summary: `Search the web: ${text(input.query) || ''}`.slice(0, 280) };
+    case 'AskUserQuestion': {
+      const questions = Array.isArray(input.questions) ? input.questions.flatMap((value) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+        const question = value as Record<string, unknown>;
+        if (typeof question.question !== 'string' || !Array.isArray(question.options)) return [];
+        const options = question.options.flatMap((option) => {
+          if (!option || typeof option !== 'object' || Array.isArray(option)) return [];
+          const item = option as Record<string, unknown>;
+          if (typeof item.label !== 'string') return [];
+          return [{ label: item.label, ...(typeof item.description === 'string' ? { description: item.description } : {}) }];
+        });
+        return [{
+          question: question.question,
+          ...(typeof question.header === 'string' ? { header: question.header } : {}),
+          ...(typeof question.multiSelect === 'boolean' ? { multiSelect: question.multiSelect } : {}),
+          options,
+        }];
+      }) : [];
+      return { summary: `Claude has a question: ${questions[0]?.question || 'Please answer this question.'}`, ...(questions.length ? { questions } : {}) };
+    }
     case 'ExitPlanMode':
       return { summary: 'Start implementing the plan' };
     default: {
@@ -43,20 +71,21 @@ export class ApprovalBroker {
   private held = new Map<string, Held>();
   onChange?: (sessionId: string) => void;
 
-  hold(sessionId: string, toolName: string, input: Record<string, unknown> | undefined, holdMs: number): { approval: PendingApproval; outcome: Promise<ApprovalOutcome> } {
-    const { summary, detail } = summarizeToolRequest(toolName, input);
-    const approval: PendingApproval = { id: randomUUID(), toolName, summary, detail, requestedAt: new Date().toISOString() };
-    let settle!: (outcome: ApprovalOutcome) => void;
-    const outcome = new Promise<ApprovalOutcome>((resolve) => { settle = resolve; });
+  hold(sessionId: string, toolName: string, input: Record<string, unknown> | undefined, holdMs: number): { approval: PendingApproval; outcome: Promise<ApprovalResolution> } {
+    const originalInput = input ?? {};
+    const { summary, detail, questions } = summarizeToolRequest(toolName, originalInput);
+    const approval: PendingApproval = { id: randomUUID(), toolName, summary, detail, questions, requestedAt: new Date().toISOString() };
+    let settle!: (outcome: ApprovalResolution) => void;
+    const outcome = new Promise<ApprovalResolution>((resolve) => { settle = resolve; });
     let timer: NodeJS.Timeout | undefined;
-    const resolve = (result: ApprovalOutcome) => {
+    const resolve = (result: ApprovalOutcome, answers?: Record<string, string>) => {
       if (timer) clearTimeout(timer);
       if (!this.held.delete(approval.id)) return;
-      settle(result);
+      settle({ outcome: result, toolName, input: originalInput, ...(answers ? { answers } : {}) });
       this.onChange?.(sessionId);
     };
     timer = setTimeout(() => resolve('timeout'), holdMs);
-    this.held.set(approval.id, { approval, sessionId, inputKey: inputKey(toolName, input), resolve });
+    this.held.set(approval.id, { approval, sessionId, input: originalInput, inputKey: inputKey(toolName, input), resolve });
     this.onChange?.(sessionId);
     return { approval, outcome };
   }
@@ -65,12 +94,12 @@ export class ApprovalBroker {
     return [...this.held.values()].filter((held) => held.sessionId === sessionId).map((held) => held.approval);
   }
 
-  decide(sessionId: string, approvalId: string | undefined, decision: ApprovalDecision): 'ok' | 'none' | 'stale' {
+  decide(sessionId: string, approvalId: string | undefined, decision: ApprovalDecision, answers?: Record<string, string>): 'ok' | 'none' | 'stale' {
     const mine = [...this.held.values()].filter((held) => held.sessionId === sessionId);
     if (!mine.length) return 'none';
     const target = approvalId ? mine.find((held) => held.approval.id === approvalId) : mine[0];
     if (!target) return 'stale';
-    target.resolve(decision);
+    target.resolve(decision, answers);
     return 'ok';
   }
 
@@ -95,9 +124,11 @@ export class ApprovalBroker {
   }
 }
 
-export function hookDecisionBody(outcome: ApprovalOutcome): Record<string, unknown> {
+export function hookDecisionBody(outcome: ApprovalOutcome, input?: Record<string, unknown>, answers?: Record<string, string>): Record<string, unknown> {
   if (outcome === 'allow') {
-    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } };
+    const decision: { behavior: 'allow'; updatedInput?: Record<string, unknown> } = { behavior: 'allow' };
+    if (input !== undefined) decision.updatedInput = answers ? { ...input, answers } : input;
+    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };
   }
   if (outcome === 'deny') {
     return {
