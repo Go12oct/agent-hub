@@ -11,6 +11,7 @@ import { ClaudeCollector, type ClaudeHookPayload } from './collectors/claude.js'
 import { CodexCollector, type CodexHookPayload } from './collectors/codex.js';
 import { AntigravityCollector } from './collectors/antigravity.js';
 import { DevinCollector } from './collectors/devin.js';
+import { DevinLocalCollector } from './collectors/devin-local.js';
 import { CodexCloudCollector } from './collectors/codex-cloud.js';
 import type { HubConfig } from './config.js';
 import { cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError, warnLocalReplyFailure, type ReplyAgent, type ReplyRunner } from './local-replies.js';
@@ -75,6 +76,7 @@ export function createHub(
     codex,
     claude,
     new AntigravityCollector(config.lookbackDays),
+    new DevinLocalCollector(),
     ...(config.devinApiKey ? [new DevinCollector(config.devinApiKey)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];
@@ -85,6 +87,9 @@ export function createHub(
       antigravity: config.localReplies?.agy,
     },
   }));
+  const collectorForSession = (session: AgentSession): Collector | undefined => session.id.startsWith('devin-local:')
+    ? collectors.find((collector) => collector.name === 'devin-local')
+    : collectors.find((collector) => collector.name === session.agent);
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
   const approvals = new ApprovalBroker();
   const approvalsEnabled = config.approvals?.enabled !== false;
@@ -111,7 +116,7 @@ export function createHub(
       ...session,
       ...(approval ? { approval, approvals: pending, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
       canReply: session.agent === 'devin'
-        ? Boolean(collectors.find((collector) => collector.name === 'devin')?.sendMessage)
+        ? Boolean(collectorForSession(session)?.sendMessage)
         : isReplyAgent(session.agent) && Boolean(
           replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
         ),
@@ -194,7 +199,7 @@ export function createHub(
     const id = request.params.id;
     const session = sessions.get(id);
     if (!session) return reply.code(404).send({ error: 'Session not found' });
-    const collector = collectors.find((item) => item.name === session.agent);
+    const collector = collectorForSession(session);
     const limit = Math.max(1, Math.min(100, Number(request.query.limit) || 30));
     const messages: SessionMessage[] = collector ? await collector.getMessages(session.nativeId, limit) : [];
     return messages;
@@ -205,7 +210,7 @@ export function createHub(
     if (approvals.pending(session.id).length) {
       return reply.code(409).send({ error: 'Answer the request in this chat first.' });
     }
-    const collector = collectors.find((item) => item.name === session.agent);
+    const collector = collectorForSession(session);
     const isDevinReply = session.agent === 'devin' && Boolean(collector?.sendMessage);
     const isLocalReply = isReplyAgent(session.agent) && Boolean(
       replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
