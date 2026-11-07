@@ -665,7 +665,7 @@ function AgentTile({
       )}
       <span className="tile-meta">
         {session.startedAt && <span>{formatElapsed(now - (Number.isFinite(elapsedAt) ? elapsedAt! : now))}</span>}
-        <span>{steps} steps</span><span>now</span>
+        <span>{steps} {steps === 1 ? 'step' : 'steps'}</span><span>now</span>
       </span>
     </button>
   );
