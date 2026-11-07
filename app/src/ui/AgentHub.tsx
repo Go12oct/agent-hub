@@ -464,7 +464,7 @@ function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing
           </button>
         )}
         <p className="hint">On your PC, open <b>Agent Hub - Pair Phone</b> on the Desktop to show the QR code.</p>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="alert">{error}</div>}
         {onCancel && <button type="button" className="secondary" onClick={onCancel} disabled={connecting}>Keep current PC</button>}
         <button className="link-btn" onClick={() => setManual((value) => !value)}>
           Enter details manually <ChevronDown size={16} className={manual ? 'flip' : ''} />
@@ -668,7 +668,7 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
       {canReply ? (
         <footer className="composer">
           {(sendError || (!sending && session.replyError)) && (
-            <div className="error small">{sendError || session.replyError}</div>
+            <div className="alert small">{sendError || session.replyError}</div>
           )}
           <div className="composer-box">
             <textarea value={draft} rows={1} placeholder={`Message ${agentLabels[session.agent]}`}
@@ -751,7 +751,7 @@ function ApprovalCard({ session, approval, pairing }: { session: AgentSession; a
           </div>
         </div>
       ))}
-      {error && <div className="error small">{error}</div>}
+      {error && <div className="alert small">{error}</div>}
       <div className="approval-actions">
         <button className="secondary deny" disabled={Boolean(busy)} onClick={() => void decide('deny')}>
           {busy === 'deny' ? <LoaderCircle className="spin" size={18} /> : <X size={18} />} Deny

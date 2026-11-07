@@ -53,8 +53,8 @@ a { color: var(--text); }
 .primary:disabled, .secondary:disabled { opacity: .5; }
 .hint { margin: 0; color: var(--text-2); font-size: 14px; line-height: 20px; text-align: center; }
 .hint b { color: var(--text); font-weight: 500; }
-.error { padding: 12px; border: 1px solid rgba(229, 72, 77, .3); border-radius: 8px; background: rgba(229, 72, 77, .08); color: var(--text); font-size: 14px; line-height: 20px; }
-.error.small { margin-bottom: 8px; padding: 8px 12px; }
+.alert { padding: 12px; border: 1px solid rgba(229, 72, 77, .3); border-radius: 8px; background: rgba(229, 72, 77, .08); color: var(--text); font-size: 14px; line-height: 20px; }
+.alert.small { margin-bottom: 8px; padding: 8px 12px; }
 .link-btn { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; color: var(--text-2); font-size: 14px; }
 .flip { transform: rotate(180deg); }
 .manual { display: flex; flex-direction: column; gap: 8px; }
