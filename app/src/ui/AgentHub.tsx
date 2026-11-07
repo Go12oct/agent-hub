@@ -77,6 +77,7 @@ function relativeTime(value?: string): string {
 
 export function AgentHub() {
   const [pairing, setPairing] = useState<PairingDetails>();
+  const [pairLink, setPairLink] = useState<string>();
   const [ready, setReady] = useState(false);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
@@ -206,6 +207,7 @@ export function AgentHub() {
     let remove: (() => void) | undefined;
     void import('@capacitor/app').then(async ({ App }) => {
       const openLink = (link?: string | null) => {
+        if (link && parsePairingLink(link)) { setPairLink(link); return; }
         const id = sessionIdFromLink(link);
         if (id) { setSettingsOpen(false); setSearchOpen(false); setSelectedId(id); }
       };
@@ -260,7 +262,7 @@ export function AgentHub() {
   }
 
   if (!ready) return <div className="splash"><span className="logo">A</span></div>;
-  if (!pairing) return <Setup onPaired={(next) => setPairing(next)} />;
+  if (!pairing) return <Setup link={pairLink} onPaired={(next) => { setPairLink(undefined); setPairing(next); }} />;
 
   if (selectedSession) {
     return <ChatView key={selectedSession.id} session={selectedSession} pairing={pairing} onBack={() => setSelectedId(undefined)} />;
@@ -355,13 +357,16 @@ export function AgentHub() {
   );
 }
 
-function Setup({ onPaired }: { onPaired: (pairing: PairingDetails) => void }) {
+function Setup({ link, onPaired }: { link?: string; onPaired: (pairing: PairingDetails) => void }) {
   const [manual, setManual] = useState(false);
   const [pairInput, setPairInput] = useState('');
   const [urlInput, setUrlInput] = useState('');
   const [tokenInput, setTokenInput] = useState('');
   const [error, setError] = useState('');
   const [connecting, setConnecting] = useState(false);
+  useEffect(() => {
+    if (link) { setPairInput(link); void connect(link); }
+  }, [link]);
 
   async function connect(link = pairInput) {
     setError('');

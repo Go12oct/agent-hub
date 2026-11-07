@@ -39,7 +39,7 @@ a { color: var(--accent); }
 .logo.big { width: 64px; height: 64px; border-radius: 18px; font-size: 30px; }
 
 /* Setup */
-.setup { display: flex; min-height: 100dvh; flex-direction: column; justify-content: center; gap: 32px; padding: calc(var(--top) + 32px) 24px calc(var(--bottom) + 32px); max-width: 480px; margin: 0 auto; }
+.setup { display: flex; height: 100dvh; box-sizing: border-box; overflow-y: auto; flex-direction: column; justify-content: safe center; gap: 32px; padding: calc(var(--top) + 32px) 24px calc(var(--bottom) + 32px); max-width: 480px; margin: 0 auto; }
 .setup-hero { text-align: center; }
 .setup-hero .logo { margin: 0 auto 18px; }
 .setup-hero h1 { margin: 0 0 8px; font-size: 28px; }

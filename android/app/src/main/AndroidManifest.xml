@@ -28,6 +28,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="agenthub" android:host="session" />
+                <data android:scheme="agenthub" android:host="pair" />
             </intent-filter>
 
         </activity>
