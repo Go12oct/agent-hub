@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import {
+  AnimatePresence, LayoutGroup, animate, motion, useMotionValue, useTransform,
+} from 'motion/react';
 import {
   ArrowLeft, ArrowUp, Check, ShieldAlert, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, LogOut, QrCode,
   Search, Settings, TerminalSquare, Wifi, WifiOff, X,
@@ -22,6 +26,23 @@ const agentMarks: Record<AgentKind, string> = {
 const statusLabels: Record<AgentSession['status'], string> = {
   needs_input: 'Needs you', working: 'Working', done: 'Done', idle: 'Idle', error: 'Error',
 };
+
+type NativeViewTransition = { finished: Promise<void> };
+type ViewTransitionDocument = Document & {
+  startViewTransition?: (callback: () => void) => NativeViewTransition;
+};
+
+function withViewTransition(update: () => void): NativeViewTransition | undefined {
+  const transitionDocument = document as ViewTransitionDocument;
+  if (transitionDocument.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    return transitionDocument.startViewTransition.call(document, () => flushSync(update));
+  }
+  update();
+}
+
+function sharedTransitionName(prefix: 'av' | 'title', sessionId: string): string {
+  return `${prefix}-${CSS.escape(sessionId)}`;
+}
 
 async function loadPairing(): Promise<PairingDetails | undefined> {
   const native = Capacitor.isNativePlatform();
@@ -106,6 +127,7 @@ export function AgentHub() {
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [selectedAgent, setSelectedAgent] = useState<AgentKind | 'all'>('all');
   const [selectedId, setSelectedId] = useState<string>();
+  const [transitionSessionId, setTransitionSessionId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -138,8 +160,12 @@ export function AgentHub() {
     } catch {}
   }, []);
 
-  const openSession = useCallback((sessionId: string) => {
-    setSelectedId(sessionId);
+  const openSession = useCallback((sessionId: string, source?: HTMLElement) => {
+    if (source) {
+      source.querySelector<HTMLElement>('.avatar')?.style.setProperty('view-transition-name', sharedTransitionName('av', sessionId));
+      source.querySelector<HTMLElement>('.deck-title, .tile-title, .row-title')?.style.setProperty('view-transition-name', sharedTransitionName('title', sessionId));
+    }
+    withViewTransition(() => setSelectedId(sessionId));
     void clearLocalNotifications([
       localNotificationId(`session:${sessionId}`),
       ...[...(previousApprovals.current.get(sessionId) ?? [])].map((id) => localNotificationId(`approval:${id}`)),
@@ -377,7 +403,27 @@ export function AgentHub() {
   }
 
   if (selectedSession) {
-    return <ChatView key={selectedSession.id} session={selectedSession} pairing={pairing} onBack={() => setSelectedId(undefined)} />;
+    return (
+      <ChatView
+        key={selectedSession.id}
+        session={selectedSession}
+        pairing={pairing}
+        onBack={() => {
+          const transition = withViewTransition(() => {
+            setTransitionSessionId(selectedSession.id);
+            setSelectedId(undefined);
+          });
+          if (transition) {
+            void transition.finished.then(
+              () => setTransitionSessionId(undefined),
+              () => setTransitionSessionId(undefined),
+            );
+          } else {
+            setTransitionSessionId(undefined);
+          }
+        }}
+      />
+    );
   }
 
   async function decide(item: QueueItem, decision: 'allow' | 'deny') {
@@ -443,24 +489,29 @@ export function AgentHub() {
           <>
             <ApprovalDeck items={queue} errors={decisionErrors} onOpen={openSession} onDecide={(item, value) => void decide(item, value)} />
             <div className="section-head"><span>Agents</span><span>{workingCount} working</span></div>
-            <div className="agent-tiles">
-              {activeTiles.map((session) => (
-                <AgentTile
-                  key={session.id}
-                  session={session}
-                  messages={activity.get(session.id) ?? []}
-                  now={now}
-                  onOpen={() => openSession(session.id)}
-                />
-              ))}
-            </div>
+            <LayoutGroup>
+              <div className="agent-tiles">
+                <AnimatePresence initial={false}>
+                  {activeTiles.map((session) => (
+                    <AgentTile
+                      key={session.id}
+                      session={session}
+                      messages={activity.get(session.id) ?? []}
+                      now={now}
+                      transitionSessionId={transitionSessionId}
+                      onOpen={(source) => openSession(session.id, source)}
+                    />
+                  ))}
+                </AnimatePresence>
+              </div>
+            </LayoutGroup>
             {groups.recent.length > 0 && (
               <>
                 <button className="finished-toggle" onClick={() => setFinishedOpen((value) => !value)}>
                   <span>{groups.recent.length} finished or idle</span><span>{search || finishedOpen ? 'Hide' : 'Show'}</span>
                 </button>
                 {(search || finishedOpen) && dayGroups(groups.recent).map(([title, items]) => (
-                  <Group key={title} title={title} sessions={items} onOpen={openSession} />
+                  <Group key={title} title={title} sessions={items} transitionSessionId={transitionSessionId} onOpen={openSession} />
                 ))}
               </>
             )}
@@ -501,43 +552,25 @@ function ApprovalDeck({
 }: {
   items: QueueItem[];
   errors: Record<string, string>;
-  onOpen: (id: string) => void;
+  onOpen: (id: string, source?: HTMLElement) => void;
   onDecide: (item: QueueItem, decision: 'allow' | 'deny') => void;
 }) {
-  const [leaving, setLeaving] = useState<{ item: QueueItem; decision: 'allow' | 'deny' }>();
-  const exitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => { if (exitTimer.current) clearTimeout(exitTimer.current); }, []);
-  const visible = leaving
-    ? [leaving.item, ...items.filter((item) => queueItemKey(item) !== queueItemKey(leaving.item))]
-    : items;
-
-  function decide(item: QueueItem, decision: 'allow' | 'deny') {
-    if (leaving || item.kind !== 'approval') return;
-    setLeaving({ item, decision });
-    onDecide(item, decision);
-    exitTimer.current = setTimeout(() => setLeaving(undefined), 350);
-  }
-
-  if (!visible.length) {
+  if (!items.length) {
     return <div className="deck-empty"><strong>Nothing needs you</strong><span>You'll get a ping when an agent asks.</span></div>;
   }
 
   return (
     <div className="approval-deck">
-      {visible.map((item, depth) => {
-        const isLeaving = Boolean(leaving && queueItemKey(leaving.item) === queueItemKey(item));
-        return (
-          <DeckCard
-            key={queueItemKey(item)}
-            item={item}
-            depth={depth}
-            leaving={isLeaving ? leaving?.decision : undefined}
-            error={item.kind === 'approval' ? errors[item.approval.id] : undefined}
-            onOpen={() => onOpen(item.session.id)}
-            onDecide={(decision) => decide(item, decision)}
-          />
-        );
-      })}
+      {items.map((item, depth) => (
+        <DeckCard
+          key={queueItemKey(item)}
+          item={item}
+          depth={depth}
+          error={item.kind === 'approval' ? errors[item.approval.id] : undefined}
+          onOpen={(source) => onOpen(item.session.id, source)}
+          onDecide={(decision) => onDecide(item, decision)}
+        />
+      ))}
     </div>
   );
 }
@@ -545,62 +578,74 @@ function ApprovalDeck({
 function DeckCard({
   item,
   depth,
-  leaving,
   error,
   onOpen,
   onDecide,
 }: {
   item: QueueItem;
   depth: number;
-  leaving?: 'allow' | 'deny';
   error?: string;
-  onOpen: () => void;
+  onOpen: (source: HTMLElement) => void;
   onDecide: (decision: 'allow' | 'deny') => void;
 }) {
-  const drag = useRef<{ startX: number; dx: number } | undefined>(undefined);
-  const [dragging, setDragging] = useState(false);
-  const [dragX, setDragX] = useState(0);
+  const x = useMotionValue(0);
+  const rotate = useTransform(x, [-240, 0, 240], [-10, 0, 10]);
+  const allowOpacity = useTransform(x, [0, 100], [0, 1]);
+  const denyOpacity = useTransform(x, [-100, 0], [1, 0]);
+  const committing = useRef(false);
   const approval = item.kind === 'approval' ? item.approval : undefined;
   const questions = approval?.questions ?? [];
-  const swipeable = Boolean(approval && questions.length === 0 && depth === 0 && !leaving);
+  const swipeable = Boolean(approval && questions.length === 0 && depth === 0);
   const preview = item.kind === 'input' && item.session.lastMessage ? previewText(item.session.lastMessage) : '';
+  const depthIndex = Math.min(depth, 3);
+  const y = [0, 12, 24, 24][depthIndex]!;
+  const scale = [1, 0.95, 0.9, 0.9][depthIndex]!;
 
-  function endDrag(commit: boolean) {
-    if (!drag.current) return;
-    const { dx } = drag.current;
-    drag.current = undefined;
-    setDragging(false);
-    if (commit && Math.abs(dx) > 100) {
-      onDecide(dx > 0 ? 'allow' : 'deny');
+  async function flyOut(decision: 'allow' | 'deny', velocity = 0) {
+    if (!swipeable || item.kind !== 'approval' || committing.current) return;
+    committing.current = true;
+    const direction = decision === 'allow' ? 1 : -1;
+    await animate(x, direction * (window.innerWidth + 160), {
+      type: 'spring',
+      stiffness: 300,
+      damping: 32,
+      velocity,
+    });
+    onDecide(decision);
+  }
+
+  function endDrag(info: { offset: { x: number }; velocity: { x: number } }) {
+    const offsetDirection = Math.sign(info.offset.x);
+    const velocityDirection = Math.sign(info.velocity.x);
+    const offsetCommits = Math.abs(info.offset.x) > 100;
+    const velocityCommits = Math.abs(info.velocity.x) > 600 && (!offsetDirection || velocityDirection === offsetDirection);
+    if (offsetCommits || velocityCommits) {
+      const direction = offsetCommits ? offsetDirection : velocityDirection;
+      const velocity = velocityDirection === direction ? info.velocity.x : 0;
+      void flyOut(direction > 0 ? 'allow' : 'deny', velocity);
       return;
     }
-    setDragX(0);
+    void animate(x, 0, { type: 'spring', stiffness: 500, damping: 34 });
   }
 
   return (
-    <section
-      className={`deck-card needs_input${dragging ? ' dragging' : ''}${leaving ? ` leaving ${leaving}` : ''}`}
-      data-depth={Math.min(depth, 3)}
-      style={{
-        zIndex: 10 - depth,
-        ...(dragging ? { transform: `translateX(${dragX}px) rotate(${dragX / 24}deg)` } : {}),
+    <motion.div
+      className="deck-card needs_input"
+      data-depth={depthIndex}
+      drag={swipeable ? 'x' : false}
+      dragElastic={0.9}
+      dragMomentum={false}
+      initial={error ? { scale: 0.96, opacity: 0 } : false}
+      animate={{ y, scale, opacity: depthIndex >= 3 ? 0 : 1 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+      style={{ x, rotate, zIndex: 10 - depth }}
+      onPointerDownCapture={(event) => {
+        if (event.target instanceof Element && event.target.closest('button')) event.stopPropagation();
       }}
-      onPointerDown={(event) => {
-        if (!swipeable || event.target instanceof Element && event.target.closest('button')) return;
-        drag.current = { startX: event.clientX, dx: 0 };
-        setDragging(true);
-        event.currentTarget.setPointerCapture(event.pointerId);
-      }}
-      onPointerMove={(event) => {
-        if (!drag.current) return;
-        drag.current.dx = event.clientX - drag.current.startX;
-        setDragX(drag.current.dx);
-      }}
-      onPointerUp={() => endDrag(true)}
-      onPointerCancel={() => endDrag(false)}
+      onDragEnd={(_, info) => endDrag(info)}
     >
-      <span className="deck-stamp allow-stamp" style={{ opacity: Math.min(1, Math.max(0, dragX / 100)) }}>ALLOW</span>
-      <span className="deck-stamp deny-stamp" style={{ opacity: Math.min(1, Math.max(0, -dragX / 100)) }}>DENY</span>
+      <motion.span className="deck-stamp allow-stamp" style={{ opacity: allowOpacity }}>ALLOW</motion.span>
+      <motion.span className="deck-stamp deny-stamp" style={{ opacity: denyOpacity }}>DENY</motion.span>
       <div className="deck-who">
         <Avatar agent={item.session.agent} />
         <span><strong className={`agent-name ${item.session.agent}`}>{agentLabels[item.session.agent]}</strong><span>{item.session.project}</span></span>
@@ -621,15 +666,21 @@ function DeckCard({
       {approval && questions.length === 0 ? (
         <>
           <div className="deck-actions">
-            <button className="deck-deny" onClick={() => onDecide('deny')}>Deny</button>
-            <button className="deck-allow" onClick={() => onDecide('allow')}>Allow</button>
+            <button className="deck-deny" onClick={() => void flyOut('deny')}>Deny</button>
+            <button className="deck-allow" onClick={() => void flyOut('allow')}>Allow</button>
           </div>
-          <button className="deck-open" onClick={onOpen}>Open chat</button>
+          <button className="deck-open" onClick={(event) => {
+            const source = event.currentTarget.closest<HTMLElement>('.deck-card');
+            if (source) onOpen(source);
+          }}>Open chat</button>
         </>
       ) : (
-        <button className="deck-primary" onClick={onOpen}>{approval ? 'Answer' : 'Reply'}</button>
+        <button className="deck-primary" onClick={(event) => {
+          const source = event.currentTarget.closest<HTMLElement>('.deck-card');
+          if (source) onOpen(source);
+        }}>{approval ? 'Answer' : 'Reply'}</button>
       )}
-    </section>
+    </motion.div>
   );
 }
 
@@ -637,13 +688,16 @@ function AgentTile({
   session,
   messages,
   now,
+  transitionSessionId,
   onOpen,
 }: {
   session: AgentSession;
   messages: SessionMessage[];
   now: number;
-  onOpen: () => void;
+  transitionSessionId?: string;
+  onOpen: (source: HTMLElement) => void;
 }) {
+  const shared = session.id === transitionSessionId;
   const needsInput = session.status === 'needs_input';
   const approval = (session.approvals ?? (session.approval ? [session.approval] : []))[0];
   const current = needsInput ? approval?.summary : session.lastMessage ? previewText(session.lastMessage) : '';
@@ -654,15 +708,23 @@ function AgentTile({
   const steps = messages.length >= 100 ? '100+' : messages.filter((message) => message.role === 'tool').length;
 
   return (
-    <button className={`agent-tile ${session.status}`} onClick={onOpen}>
+    <motion.button
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+      className={`agent-tile ${session.status}`}
+      onClick={(event) => onOpen(event.currentTarget)}
+    >
       <span className="tile-top">
-        <Avatar agent={session.agent} />
+        <Avatar agent={session.agent} viewTransitionName={shared ? sharedTransitionName('av', session.id) : undefined} />
         <span className="tile-agent"><strong className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
         <span className={`status ${session.status}`}>
           {statusLabels[session.status]}
         </span>
       </span>
-      <span className="tile-title">{session.title}</span>
+      <span className="tile-title" style={shared ? { viewTransitionName: sharedTransitionName('title', session.id) } : undefined}>{session.title}</span>
       {current && <span className="tile-current">{current}</span>}
       {hasTimestamps && (
         <span className="activity-track" aria-label="Recent activity">
@@ -679,7 +741,7 @@ function AgentTile({
         {session.startedAt && <span>{formatElapsed(now - (Number.isFinite(elapsedAt) ? elapsedAt! : now))}</span>}
         <span>{steps} {steps === 1 ? 'step' : 'steps'}</span><span>now</span>
       </span>
-    </button>
+    </motion.button>
   );
 }
 
@@ -829,34 +891,82 @@ function dayGroups(sessions: AgentSession[]): Array<[string, AgentSession[]]> {
   return buckets.filter(([, items]) => items.length > 0);
 }
 
-function Avatar({ agent, size = 'md' }: { agent: AgentKind; size?: 'sm' | 'md' }) {
-  return <span className={`avatar ${agent} ${size}`} aria-hidden="true">{agentMarks[agent]}</span>;
+function Avatar({
+  agent,
+  size = 'md',
+  viewTransitionName,
+}: {
+  agent: AgentKind;
+  size?: 'sm' | 'md';
+  viewTransitionName?: string;
+}) {
+  return <span className={`avatar ${agent} ${size}`} style={viewTransitionName ? { viewTransitionName } : undefined} aria-hidden="true">{agentMarks[agent]}</span>;
 }
 
-function Group({ title, tone, sessions, onOpen }: { title: string; tone?: string; sessions: AgentSession[]; onOpen: (id: string) => void }) {
+function Group({
+  title,
+  tone,
+  sessions,
+  transitionSessionId,
+  onOpen,
+}: {
+  title: string;
+  tone?: string;
+  sessions: AgentSession[];
+  transitionSessionId?: string;
+  onOpen: (id: string, source?: HTMLElement) => void;
+}) {
   return (
     <section className={`group ${tone || ''}`}>
       <h2>{title} <span>{sessions.length}</span></h2>
-      <div className="cards">
-        {sessions.map((session) => <Row key={session.id} session={session} onOpen={() => onOpen(session.id)} />)}
-      </div>
+      <LayoutGroup>
+        <div className="cards">
+          <AnimatePresence initial={false}>
+            {sessions.map((session) => (
+              <Row
+                key={session.id}
+                session={session}
+                transitionSessionId={transitionSessionId}
+                onOpen={(source) => onOpen(session.id, source)}
+              />
+            ))}
+          </AnimatePresence>
+        </div>
+      </LayoutGroup>
     </section>
   );
 }
 
-function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void }) {
+function Row({
+  session,
+  transitionSessionId,
+  onOpen,
+}: {
+  session: AgentSession;
+  transitionSessionId?: string;
+  onOpen: (source: HTMLElement) => void;
+}) {
+  const shared = session.id === transitionSessionId;
   const preview = session.lastMessage ? previewText(session.lastMessage) : '';
   const request = session.status === 'needs_input' ? (session.approvals ?? (session.approval ? [session.approval] : []))[0] : undefined;
   return (
-    <button className={`row ${session.status}`} onClick={onOpen}>
-      <Avatar agent={session.agent} />
+    <motion.button
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+      className={`row ${session.status}`}
+      onClick={(event) => onOpen(event.currentTarget)}
+    >
+      <Avatar agent={session.agent} viewTransitionName={shared ? sharedTransitionName('av', session.id) : undefined} />
       <span className="row-body">
         <span className="row-top">
           <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
           <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>
           <span className="row-time">{relativeTime(session.updatedAt)}</span>
         </span>
-        <span className="row-title">{session.title}</span>
+        <span className="row-title" style={shared ? { viewTransitionName: sharedTransitionName('title', session.id) } : undefined}>{session.title}</span>
         {request
           ? <span className="row-prompt">{request.summary}</span>
           : preview && <span className="row-preview">{session.lastRole === 'user' ? <b>You: </b> : ''}{preview}</span>}
@@ -864,7 +974,7 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
           <span className="row-meta">{[session.project, session.branch].filter(Boolean).join(' · ')}</span>
         )}
       </span>
-    </button>
+    </motion.button>
   );
 }
 
@@ -963,8 +1073,9 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
     <main className="chat">
       <header className="chat-bar">
         <button className="icon-btn" aria-label="Back" onClick={onBack}><ArrowLeft size={22} /></button>
+        <Avatar agent={session.agent} viewTransitionName={sharedTransitionName('av', session.id)} />
         <div className="chat-heading">
-          <strong>{session.title}</strong>
+          <strong style={{ viewTransitionName: sharedTransitionName('title', session.id) }}>{session.title}</strong>
           <span>
             <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
             <span className={`dot ${session.status}`} />{statusLabels[session.status]}
