@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft, ArrowUp, BellRing, Check, ShieldAlert, ChevronDown, ChevronRight, ExternalLink, Folder, GitBranch, LoaderCircle, LogOut, QrCode,
-  Search, Settings, Sparkles, TerminalSquare, Wifi, WifiOff, X,
+  ArrowLeft, ArrowUp, Check, ShieldAlert, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, LogOut, QrCode,
+  Search, Settings, TerminalSquare, Wifi, WifiOff, X,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,8 +15,8 @@ import {
 } from '../pairing';
 
 const agentOrder: AgentKind[] = ['devin', 'codex', 'claude-code', 'antigravity', 'codex-cloud'];
-const agentInitials: Record<AgentKind, string> = {
-  devin: 'D', codex: 'C', 'codex-cloud': 'C', 'claude-code': '✳', antigravity: '✦',
+const agentMarks: Record<AgentKind, string> = {
+  devin: 'DV', codex: 'CX', 'codex-cloud': 'XC', 'claude-code': 'CL', antigravity: 'AG',
 };
 const statusLabels: Record<AgentSession['status'], string> = {
   needs_input: 'Needs you', working: 'Working', done: 'Done', idle: 'Idle', error: 'Error',
@@ -307,7 +307,7 @@ export function AgentHub() {
     setSessions([]);
   }
 
-  if (!ready) return <div className="splash"><span className="logo">A</span></div>;
+  if (!ready) return <div className="splash"><span className="logo">AH</span></div>;
   if (!pairing || pairLink) {
     return (
       <Setup
@@ -357,13 +357,13 @@ export function AgentHub() {
 
       {!search && (
         <section className="overview" aria-label="Overview">
-          <button className={`stat needs_input${statusFilter === 'needs_input' ? ' active' : ''}`} onClick={() => toggleStatus('needs_input')}>
-            <BellRing size={16} /><strong>{needsCount}</strong><span>Needs you</span>
+          <button className={`stat needs_input${needsCount ? ' has' : ''}${statusFilter === 'needs_input' ? ' active' : ''}`} aria-pressed={statusFilter === 'needs_input'} onClick={() => toggleStatus('needs_input')}>
+            <span>Needs you</span><strong>{needsCount}</strong>
           </button>
-          <button className={`stat working${statusFilter === 'working' ? ' active' : ''}`} onClick={() => toggleStatus('working')}>
-            <span className="pulse" /><strong>{workingCount}</strong><span>Working</span>
+          <button className={`stat working${statusFilter === 'working' ? ' active' : ''}`} aria-pressed={statusFilter === 'working'} onClick={() => toggleStatus('working')}>
+            <span>Working</span><strong>{workingCount}</strong>
           </button>
-          <div className="stat today"><Sparkles size={16} /><strong>{todayCount}</strong><span>Today</span></div>
+          <div className="stat today"><span>Today</span><strong>{todayCount}</strong></div>
         </section>
       )}
 
@@ -371,7 +371,7 @@ export function AgentHub() {
         <button className={selectedAgent === 'all' ? 'tab active' : 'tab'} onClick={() => setSelectedAgent('all')}>All <span>{sessions.length}</span></button>
         {tabs.map((agent) => (
           <button key={agent} className={selectedAgent === agent ? `tab active ${agent}` : `tab ${agent}`} onClick={() => setSelectedAgent(agent)}>
-            <i className={`tab-dot ${agent}`} />{agentLabels[agent]} <span>{counts.get(agent) || 0}</span>
+            {agentLabels[agent]} <span>{counts.get(agent) || 0}</span>
           </button>
         ))}
       </nav>
@@ -384,7 +384,7 @@ export function AgentHub() {
         ) : (
           <>
             {groups.needsYou.length > 0 && <Group title="Needs you" tone="needs_input" sessions={groups.needsYou} onOpen={openSession} />}
-            {groups.working.length > 0 && <Group title="Working now" tone="working" sessions={groups.working} onOpen={openSession} />}
+            {groups.working.length > 0 && <Group title="Working" tone="working" sessions={groups.working} onOpen={openSession} />}
             {dayGroups(groups.recent).map(([title, items]) => <Group key={title} title={title} sessions={items} onOpen={openSession} />)}
           </>
         )}
@@ -453,9 +453,9 @@ function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing
   return (
     <main className="setup">
       <div className="setup-hero">
-        <span className="logo big">A</span>
+        <span className="logo big">AH</span>
         <h1>Agent Hub</h1>
-        <p>All your Devin, Codex, Claude Code and Antigravity chats in one place.</p>
+        <p>Your Devin, Codex, Claude Code and Antigravity chats in one place</p>
       </div>
       <div className="setup-actions">
         {Capacitor.isNativePlatform() && (
@@ -495,8 +495,8 @@ function dayGroups(sessions: AgentSession[]): Array<[string, AgentSession[]]> {
   return buckets.filter(([, items]) => items.length > 0);
 }
 
-function Avatar({ agent, status, size = 'md' }: { agent: AgentKind; status?: AgentSession['status']; size?: 'sm' | 'md' }) {
-  return <span className={`avatar ${agent} ${size}`}>{agentInitials[agent]}{status && (status === 'working' || status === 'needs_input') && <i className={`badge ${status}`} />}</span>;
+function Avatar({ agent, size = 'md' }: { agent: AgentKind; size?: 'sm' | 'md' }) {
+  return <span className={`avatar ${size}`} aria-hidden="true">{agentMarks[agent]}</span>;
 }
 
 function Group({ title, tone, sessions, onOpen }: { title: string; tone?: string; sessions: AgentSession[]; onOpen: (id: string) => void }) {
@@ -512,9 +512,10 @@ function Group({ title, tone, sessions, onOpen }: { title: string; tone?: string
 
 function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void }) {
   const preview = session.lastMessage ? previewText(session.lastMessage) : '';
+  const request = session.status === 'needs_input' ? (session.approvals ?? (session.approval ? [session.approval] : []))[0] : undefined;
   return (
     <button className={`row ${session.status}`} onClick={onOpen}>
-      <Avatar agent={session.agent} status={session.status} />
+      <Avatar agent={session.agent} />
       <span className="row-body">
         <span className="row-top">
           <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
@@ -522,12 +523,11 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
           <span className="row-time">{relativeTime(session.updatedAt)}</span>
         </span>
         <span className="row-title">{session.title}</span>
-        {preview && <span className="row-preview">{session.lastRole === 'user' ? <b>You: </b> : ''}{preview}</span>}
+        {request
+          ? <span className="row-prompt">{request.summary}</span>
+          : preview && <span className="row-preview">{session.lastRole === 'user' ? <b>You: </b> : ''}{preview}</span>}
         {(session.project || session.branch) && (
-          <span className="row-meta">
-            {session.project && <span className="chip"><Folder size={12} />{session.project}</span>}
-            {session.branch && <span className="chip"><GitBranch size={12} />{session.branch}</span>}
-          </span>
+          <span className="row-meta">{[session.project, session.branch].filter(Boolean).join(' · ')}</span>
         )}
       </span>
     </button>
@@ -536,7 +536,7 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
 
 function Empty({ connection, agent }: { connection: string; agent: AgentKind | 'all' }) {
   if (connection === 'offline') return <div className="empty"><WifiOff size={30} /><h2>Can't reach your PC</h2><p>Make sure the PC is on and Agent Hub is running. Away from home, use Tailscale.</p></div>;
-  if (agent === 'devin') return <div className="empty"><span className="avatar devin">D</span><h2>No Devin sessions</h2><p>Add your Devin API key on the PC: <code>agent-hub config set devinApiKey &lt;key&gt;</code></p></div>;
+  if (agent === 'devin') return <div className="empty"><Avatar agent="devin" /><h2>No Devin sessions</h2><p>Add your Devin API key on the PC: <code>agent-hub config set devinApiKey &lt;key&gt;</code></p></div>;
   return <div className="empty"><h2>No chats yet</h2><p>Start a session in any agent and it shows up here.</p></div>;
 }
 
@@ -645,7 +645,7 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       }}>
         {loading && !messages.length && <div className="chat-empty"><LoaderCircle className="spin" size={22} /></div>}
-        {!loading && !items.length && <div className="chat-empty">No messages in this chat yet.</div>}
+        {!loading && !items.length && <div className="chat-empty">No messages yet</div>}
         {items.map((item, position) => {
           if (item.kind === 'tools') return <ToolBlock key={`t-${item.index}`} messages={item.messages} />;
           if (item.message.role === 'user') return <div key={`m-${item.index}`} className="msg user"><div className="bubble"><Markdown text={item.message.text} /></div></div>;
@@ -658,7 +658,7 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
             </div>
           );
         })}
-        {session.status === 'working' && <div className="thinking"><Avatar agent={session.agent} size="sm" /><span>{agentLabels[session.agent]} is working…</span></div>}
+        {session.status === 'working' && <div className="thinking"><i className="dot working" /><span>{agentLabels[session.agent]} is working</span></div>}
         <div ref={bottom} />
       </div>
 
