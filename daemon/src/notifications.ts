@@ -1,7 +1,6 @@
 import { agentLabels, type AgentSession, type SessionStatus } from '@agent-hub/shared';
 
 export const defaultNtfyServer = 'https://ntfy.sh';
-export const devinSecretRequestMarker = 'Devin is asking for a secret';
 
 export function sessionDeepLink(sessionId: string): string {
   return `agenthub://session/${encodeURIComponent(sessionId)}`;
@@ -11,7 +10,7 @@ export function ntfyMessage(session: AgentSession): { title: string; body: strin
   const label = agentLabels[session.agent];
   const where = session.project || session.title;
   const lastMessage = session.lastMessage;
-  if (session.agent === 'devin' && session.status === 'needs_input' && lastMessage?.startsWith(devinSecretRequestMarker)) {
+  if (session.agent === 'devin' && session.status === 'needs_input' && lastMessage?.startsWith('Devin is asking for a secret')) {
     return { title: `Devin needs a secret — ${where}`, body: lastMessage, priority: 'high', tags: 'raised_hand' };
   }
   if (session.status === 'needs_input' && session.approval) {
@@ -32,22 +31,16 @@ export function ntfyMessage(session: AgentSession): { title: string; body: strin
 }
 
 export class NtfyNotifier {
-  private previous = new Map<string, { status: SessionStatus; approvalIds: Set<string>; secretRequest: boolean }>();
+  private previous = new Map<string, { status: SessionStatus; approvalIds: Set<string> }>();
   private sentAt = new Map<string, number>();
   constructor(private config?: { server?: string; topic: string }, private fetchImpl: typeof fetch = fetch) {}
 
   async update(session: AgentSession): Promise<void> {
     const previous = this.previous.get(session.id);
     const approvals = session.approvals ?? (session.approval ? [session.approval] : []);
-    const secretRequest = session.agent === 'devin' && Boolean(session.lastMessage?.startsWith(devinSecretRequestMarker));
-    this.previous.set(session.id, {
-      status: session.status,
-      approvalIds: new Set(approvals.map((item) => item.id)),
-      secretRequest,
-    });
+    this.previous.set(session.id, { status: session.status, approvalIds: new Set(approvals.map((item) => item.id)) });
     if (!this.config?.topic) return;
     const newApproval = approvals.find((item) => !previous?.approvalIds.has(item.id));
-    const newSecretRequest = secretRequest && !previous?.secretRequest;
     const now = Date.now();
     const updatedAt = Date.parse(session.updatedAt);
     const firstSeen = previous === undefined;
@@ -56,10 +49,10 @@ export class NtfyNotifier {
       && updatedAt <= now
       && now - updatedAt <= 120_000;
     const changed = firstSeen
-      ? approvals.length > 0 || secretRequest || freshTerminalState
-      : previous.status !== session.status || Boolean(newApproval) || newSecretRequest;
+      ? approvals.length > 0 || freshTerminalState
+      : previous.status !== session.status || Boolean(newApproval);
     if (!changed || !['needs_input', 'done', 'error'].includes(session.status)) return;
-    if (!newApproval && !newSecretRequest && now - (this.sentAt.get(session.id) || 0) < 30_000) return;
+    if (!newApproval && now - (this.sentAt.get(session.id) || 0) < 30_000) return;
     this.sentAt.set(session.id, now);
     const message = ntfyMessage(newApproval ? { ...session, approval: newApproval } : { ...session, approval: undefined });
     try {
