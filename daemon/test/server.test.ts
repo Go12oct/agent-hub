@@ -95,6 +95,27 @@ describe('authenticated HTTP API', () => {
     } finally { await runtime.close(); }
   });
 
+  it('requires authentication to shut down the daemon', async () => {
+    const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
+    try {
+      expect((await runtime.app.inject({ method: 'POST', url: '/api/shutdown' })).statusCode).toBe(401);
+      const remote = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/shutdown',
+        headers: { authorization: 'Bearer test-token' },
+        remoteAddress: '192.0.2.10',
+      });
+      expect(remote.statusCode).toBe(403);
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/shutdown',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toEqual({ ok: true });
+    } finally { await runtime.close(); }
+  });
+
   it('returns 404 for unknown sessions and 405 when replies are unsupported', async () => {
     const collector = new FakeCollector();
     const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });

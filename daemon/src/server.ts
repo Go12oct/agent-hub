@@ -89,6 +89,17 @@ export function createHub(
   const approvals = new ApprovalBroker();
   const approvalsEnabled = config.approvals?.enabled !== false;
   const eventClients = new Set<{ write: (data: string) => void }>();
+  let closePromise: Promise<void> | undefined;
+  const closeRuntime = (): Promise<void> => {
+    if (!closePromise) {
+      closePromise = (async () => {
+        approvals.cancelAll();
+        await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
+        await app.close();
+      })();
+    }
+    return closePromise;
+  };
 
   const present = (session: AgentSession): AgentSession => {
     const failure = replyRunner?.failure(session.id);
@@ -163,6 +174,15 @@ export function createHub(
     if (request.url.startsWith('/hooks/codex') && !authorized(request, config.token, false)) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
+  });
+  app.post('/api/shutdown', async (request, reply) => {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.ip)) {
+      return reply.code(403).send({ error: 'Shutdown is only available on the local machine' });
+    }
+    reply.raw.once('finish', () => {
+      setTimeout(() => { void closeRuntime(); }, 50).unref();
+    });
+    return reply.code(202).send({ ok: true });
   });
   app.get('/api/sessions', async () => [...sessions.values()].map(present).sort((a, b) => {
     const rank = (status: AgentSession['status']) => status === 'needs_input' ? 0 : status === 'working' ? 1 : 2;
@@ -321,11 +341,7 @@ export function createHub(
     sessions,
     collectors,
     ready,
-    async close() {
-      approvals.cancelAll();
-      await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
-      await app.close();
-    },
+    close: closeRuntime,
   };
 }
 

@@ -7,58 +7,36 @@ Tailscale.
 
 ## Windows quick start
 
-1. Install Node.js 22 or newer (Node LTS).
-2. Download and extract the latest `agent-hub-windows.zip`, then run:
+1. Download `agent-hub-windows.zip` from the project's GitHub Releases page
+   and unzip it.
+2. Double-click **Install-AgentHub.cmd** in the extracted folder. The installer
+   sets Agent Hub to start when you sign in and adds a tray icon. It does not
+   need Node.js, npm, or administrator access. If Windows does not allow a
+   Scheduled Task, it uses your per-user Startup folder instead.
+3. Download **agent-hub-android.apk** from the same release and install it on
+   your phone. Android may ask you to allow installation from that source.
+4. Right-click the Agent Hub tray icon and choose **Pair phone**. Scan the QR
+   code shown in the opened terminal window with Agent Hub on your phone.
 
-   ```powershell
-   Set-ExecutionPolicy -Scope Process Bypass
-   .\agent-hub\scripts\install.ps1
-   ```
-
-   The installer copies the daemon to `%LOCALAPPDATA%\agent-hub`, tries to
-   register an `AgentHub` Scheduled Task at logon, installs Claude Code hooks,
-   and prints a QR pairing code. If Windows denies Scheduled Task creation
-   without admin rights, Agent Hub uses the current user's Startup folder
-   instead. If the release includes a standalone executable, Node.js is not
-   required. For a source checkout, run `npm ci` and `npm run build` first.
-3. Optional integrations:
-
-   ```powershell
-   agent-hub config set devinApiKey apk_user_...
-   agent-hub config set ntfy.topic my-private-agent-hub-topic
-   agent-hub config set codexCloud.enabled true
-   ```
-
-   Then run `agent-hub pair` to print the QR code and LAN addresses again.
-4. Install the Agent Hub APK on Android and scan the pairing QR code. The
-   desktop browser UI is served by the daemon at `http://localhost:4747`.
+The desktop browser view is at <http://localhost:4747>. To remove Agent Hub,
+double-click **Uninstall-AgentHub.cmd** in the extracted folder. Your
+configuration and agent transcripts are left untouched.
 
 The daemon's configuration and random access token are stored in
 `%APPDATA%\agent-hub\config.json`. Keep this file private. The token is never
-printed by the daemon or included in routine logs; `agent-hub pair` displays it
-inside the pairing QR code for setup.
+printed by the daemon or included in routine logs; the pairing QR code
+contains it for setup.
 
 ### Troubleshooting phone connections
 
-The PC and phone must be on the same reachable Wi-Fi or Tailscale network.
-`agent-hub pair` lists candidate addresses and marks the QR target. If the
-phone cannot connect, choose the PC's Wi-Fi address explicitly, for example
-`agent-hub pair --url http://192.168.8.3:4747`. Avoid hotspot, virtual-adapter,
-and `169.254.x.x` addresses. Windows Firewall must allow inbound TCP port 4747;
-the installer requests permission to add that rule. If it was declined, run
-`agent-hub firewall` and approve the UAC prompt. The rule applies to all
-Windows network profiles, including Public, but only allows connections from
-the local subnet and Tailscale's `100.64.0.0/10` range.
+The PC and phone must be on the same reachable Wi-Fi or Tailscale network. If
+the phone cannot connect, choose the PC's Wi-Fi address when pairing. Avoid
+hotspot, virtual-adapter, and `169.254.x.x` addresses. If Windows Firewall
+permission was declined, ask an administrator to run `agent-hub firewall`.
+The rule allows the local subnet and Tailscale's `100.64.0.0/10` range.
+For access away from home, follow the [Tailscale setup guide](docs/tailscale.md).
 
-### Remote access with Tailscale
-
-For access away from home, install Tailscale on the Windows PC and Android
-phone, sign both into the same tailnet, and run `agent-hub pair`. It includes
-any detected Tailscale `100.x.y.z` address. Use that URL when pairing. Agent
-Hub does not provide a cloud relay; the PC must be online and the daemon
-running. Tailscale's personal plan is free for typical personal use.
-
-### Optional background push
+### Notifications with ntfy
 
 Install the ntfy Android app (free, from F-Droid or GitHub Releases; no Play
 Store needed), subscribe to a private topic, and configure it with
@@ -71,7 +49,7 @@ own server with `agent-hub config set ntfy.server https://ntfy.example.com`.
 Only the agent name, project, status and a one-line summary are sent; the
 transcript stays on your PC.
 
-### Allow or deny Claude Code from your phone
+### Claude Code approvals
 
 After `agent-hub install-claude-hooks`, Claude Code's `PermissionRequest` hook
 waits on Agent Hub. The chat shows what Claude wants to run with Allow and Deny
@@ -81,20 +59,31 @@ Claude falls back to its normal prompt on the PC, and anything answered on the
 PC first clears the request on the phone. Nothing is approved automatically.
 Set `approvals.enabled false` to go back to notify-only.
 
-## Supported sources
+### Codex approvals
 
-| Agent | Data collected | Notes |
-| --- | --- | --- |
-| Codex CLI, VS Code, desktop | Local rollout JSONL under `$CODEX_HOME/sessions` or `~/.codex/sessions`; archived rollouts are also scanned. | Reads bounded file head/tail chunks and rescans for updates. |
-| Codex Cloud | Optional polling of the Codex backend tasks endpoint using the local Codex auth file. | Experimental, unofficial endpoint; may change or be unavailable. Disabled by default. |
-| Claude Code | Local `~/.claude/projects/**` transcripts and optional HTTP hooks. | Run `agent-hub install-claude-hooks` to add hooks; `uninstall-claude-hooks` removes only Agent Hub entries. |
-| Antigravity | Conversation files under `~/.gemini/antigravity-ide` (legacy `~/.gemini/antigravity`) and compatible JSONL transcripts under Antigravity brain/log directories. | The IDE stores full trajectories in SQLite `.db` files (older `.pb` protobuf); Agent Hub does not parse their opaque payloads and shows a generated title with mtime-based status. The JSONL reader supports the separately documented step/event layout where present; this format is reverse-engineered and may break after updates. |
-| Devin | Optional sessions from the Devin API using a personal `apk_user_*` API key. | Configure with `agent-hub config set devinApiKey ...`. Chat history may not be available from the API account/endpoint. |
+When Codex is installed, the Windows installer adds Agent Hub hooks to its
+existing hooks file without removing other tools' entries. Open Codex and run
+`/hooks` once to trust the hooks. Codex asks for permission through Agent Hub
+when a tool approval is actually requested; hooks will not fire when
+`approval_policy = "never"` prevents permission prompts.
 
-**Not supported:** ChatGPT web conversations are not exposed through a supported
-local API and are not collected. Agent Hub does not upload local transcripts to
-a hosted service. Configure optional cloud integrations only if you accept
-their respective provider/API terms.
+## Agent support
+
+| Agent interface | View sessions | Send replies | Allow / Deny |
+| --- | --- | --- | --- |
+| Claude Code terminal or IDE | Yes | Yes | Yes, through hooks |
+| Codex CLI | Yes | Yes | Yes, through hooks |
+| Antigravity `agy` CLI | Yes | Yes | — |
+| Antigravity desktop app | Yes | — | — |
+| Devin | Yes | Yes | — |
+
+Devin waiting/blocked states are shown as **Done**; they do not create a
+“Needs you” state. Codex Cloud polling is an optional, experimental view of
+Codex backend tasks and is disabled by default.
+
+Agent Hub does not collect ChatGPT web conversations or upload local agent
+transcripts to a hosted service. Configure optional cloud integrations only if
+you accept their respective provider/API terms.
 
 ## Development
 

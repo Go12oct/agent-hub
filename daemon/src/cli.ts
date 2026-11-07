@@ -123,6 +123,8 @@ async function run(): Promise<void> {
     console.log(installed
       ? 'Installed Codex hooks. Open Codex and run /hooks once to trust them.'
       : 'Codex config directory not found; skipping Codex hooks.');
+  } else if (command === 'hook-bridge') {
+    await runHookBridge(args[0] || '');
   } else if (command === 'uninstall-codex-hooks') {
     await uninstallCodexHooks();
     console.log('Removed Agent Hub Codex hooks.');
@@ -156,8 +158,18 @@ async function run(): Promise<void> {
     }
     const runtime = isStandalone ? destination : executable;
     const launcher = path.join(installDir, 'start-hidden.vbs');
+    const trayScript = path.join(installDir, 'tray.ps1');
     const quoteVbs = (value: string) => `"${value.replaceAll('"', '""')}"`;
-    await writeFile(launcher, `CreateObject("Wscript.Shell").Run ${quoteVbs(`${quoteVbs(runtime)} ${isStandalone ? 'start' : `${quoteVbs(destination)} start`}`)}, 0, False\r\n`);
+    const daemonCommand = `${quoteVbs(runtime)} ${isStandalone ? 'start' : `${quoteVbs(destination)} start`}`;
+    const launcherLines = [
+      'Set shell = CreateObject("Wscript.Shell")',
+      `shell.Run ${quoteVbs(daemonCommand)}, 0, False`,
+    ];
+    if (existsSync(trayScript)) {
+      const trayCommand = `powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ${quoteVbs(trayScript)}`;
+      launcherLines.push(`shell.Run ${quoteVbs(trayCommand)}, 0, False`);
+    }
+    await writeFile(launcher, `${launcherLines.join('\r\n')}\r\n`);
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
     const startupDirectory = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
     const config = await loadConfig();
@@ -184,7 +196,7 @@ async function run(): Promise<void> {
     }
   } else {
     console.log(`Agent Hub CLI
-Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-codex-hooks|uninstall-codex-hooks|install-service|uninstall-service|config set <key> <value>]
+Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-codex-hooks|uninstall-codex-hooks|hook-bridge codex|install-service|uninstall-service|config set <key> <value>]
 Config directory: ${configDirectory()}`);
   }
 }

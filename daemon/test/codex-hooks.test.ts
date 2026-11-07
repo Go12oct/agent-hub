@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { installCodexHooks, uninstallCodexHooks } from '../src/codex-hooks';
+import { codexHookCommand, installCodexHooks, uninstallCodexHooks } from '../src/codex-hooks';
 
 const config = {
   token: 'test-token',
@@ -63,6 +63,32 @@ describe('Codex hook installation', () => {
     try {
       expect(await installCodexHooks(file, Promise.resolve(config), path.join(dir, 'hook-bridge.cjs'))).toBe(false);
       await expect(readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('recognizes and replaces the standalone bridge subcommand during reinstall', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-codex-hooks-sea-'));
+    const file = path.join(dir, 'hooks.json');
+    const bridge = path.join(dir, 'hook-bridge.cjs');
+    await writeFile(file, JSON.stringify({
+      hooks: {
+        PermissionRequest: [{
+          hooks: [{ type: 'command', command: codexHookCommand(bridge, true), timeout: 60 }],
+        }],
+      },
+    }));
+    try {
+      expect(codexHookCommand(bridge, true)).toBe(`"${process.execPath}" hook-bridge codex`);
+      expect(await installCodexHooks(file, Promise.resolve(config), bridge)).toBe(true);
+      const settings = JSON.parse(await readFile(file, 'utf8'));
+      expect(settings.hooks.PermissionRequest).toHaveLength(1);
+      expect(settings.hooks.PermissionRequest[0].hooks).toEqual([{
+        type: 'command',
+        command: codexHookCommand(bridge, false),
+        timeout: 105,
+      }]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

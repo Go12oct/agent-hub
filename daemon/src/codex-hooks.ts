@@ -18,14 +18,16 @@ function bridgePath(): string {
   return path.join(path.dirname(entry), 'hook-bridge.cjs');
 }
 
-function commandFor(bridge: string): string {
+export function codexHookCommand(bridge: string, standalone = isSea()): string {
   const quote = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
-  return `${quote(process.execPath)} ${quote(bridge)} codex`;
+  return standalone
+    ? `${quote(process.execPath)} hook-bridge codex`
+    : `${quote(process.execPath)} ${quote(bridge)} codex`;
 }
 
 function isAgentHubHook(hook: any, bridge: string): boolean {
   return hook?.type === 'command' && typeof hook.command === 'string'
-    && hook.command.includes(bridge) && /\s+codex$/.test(hook.command);
+    && [codexHookCommand(bridge, false), codexHookCommand(bridge, true)].includes(hook.command);
 }
 
 export async function installCodexHooks(
@@ -50,7 +52,7 @@ export async function installCodexHooks(
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
     : {};
-  const command = commandFor(bridge);
+  const command = codexHookCommand(bridge);
   for (const event of events) {
     const entries = Array.isArray(hooks[event]) ? hooks[event] : [];
     const hook: Record<string, unknown> = event === 'PermissionRequest'
