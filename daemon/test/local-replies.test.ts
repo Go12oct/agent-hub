@@ -7,8 +7,8 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
 import {
-  buildReplyCommand, cleanReplyError, devinCliEnv, LocalReplyRunner, ReplyBusyError, ReplyFailedError,
-  warnLocalReplyFailure, type CommandRunner, type ReplyAgent,
+  buildCodexQueueCommand, buildReplyCommand, cleanReplyError, devinCliEnv, LocalReplyRunner, ReplyBusyError,
+  ReplyFailedError, resolveCodexBinary, warnLocalReplyFailure, type CommandRunner, type ReplyAgent,
 } from '../src/local-replies';
 
 const text = 'Run the tests without changing permissions';
@@ -126,6 +126,48 @@ describe('Devin Local reply command', () => {
   });
 });
 
+describe('Codex queue helpers', () => {
+  const shim = String.raw`C:\Users\Abhi\AppData\Roaming\npm\codex.cmd`;
+  const packageRoot = path.win32.join(
+    path.win32.dirname(shim),
+    'node_modules',
+    '@openai',
+    'codex',
+    'node_modules',
+    '@openai',
+  );
+  const x64Binary = path.win32.join(packageRoot, 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe');
+  const arm64Binary = path.win32.join(packageRoot, 'codex-win32-arm64', 'vendor', 'aarch64-pc-windows-msvc', 'bin', 'codex.exe');
+
+  it('resolves the x64 vendored executable before arm64', () => {
+    expect(resolveCodexBinary(shim, (candidate) => candidate === x64Binary)).toBe(x64Binary);
+  });
+
+  it('resolves the arm64 vendored executable when x64 is absent', () => {
+    expect(resolveCodexBinary(shim, (candidate) => candidate === arm64Binary)).toBe(arm64Binary);
+  });
+
+  it('returns undefined when a Windows npm shim has no vendored executable', () => {
+    expect(resolveCodexBinary(shim, () => false)).toBeUndefined();
+  });
+
+  it('uses direct executables and non-Windows command names as-is', () => {
+    const binary = String.raw`C:\Users\Abhi\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.exe`;
+    expect(resolveCodexBinary(binary, () => false)).toBe(binary);
+    expect(resolveCodexBinary('/usr/bin/codex', () => false)).toBe('/usr/bin/codex');
+  });
+
+  it('keeps queue text in a single argv element', () => {
+    const message = 'line one\n"line two &|%';
+    expect(buildCodexQueueCommand('session_123', message, process.cwd(), 'codex')).toEqual({
+      command: 'codex',
+      args: ['queue', '--thread', 'session_123', '--message', message],
+      shell: false,
+      cwd: process.cwd(),
+    });
+  });
+});
+
 function fakeChild(): ChildProcess {
   return Object.assign(new EventEmitter(), {
     pid: 1234,
@@ -133,6 +175,15 @@ function fakeChild(): ChildProcess {
     stderr: new PassThrough(),
     kill: vi.fn(() => true),
   }) as unknown as ChildProcess;
+}
+
+function closingChild(stderr: string, exitCode: number): ChildProcess {
+  const child = fakeChild();
+  setTimeout(() => {
+    if (stderr) (child.stderr as PassThrough).write(stderr);
+    child.emit('close', exitCode);
+  }, 0);
+  return child;
 }
 
 function backgroundChild(output: string, exitCode: number): ChildProcess {
@@ -170,6 +221,33 @@ function createRunner(child: ChildProcess, options: { startupMs?: number; timeou
     spawn: spawnProcess as unknown as typeof spawn,
     startupMs: options.startupMs,
     timeoutMs: options.timeoutMs ?? 60_000,
+  });
+  return { runner, spawnProcess };
+}
+
+function createCodexRunner(
+  children: Array<ChildProcess | Error>,
+  options: {
+    executable?: string;
+    startupMs?: number;
+    platform?: NodeJS.Platform;
+    exists?: (candidate: string) => boolean;
+  } = {},
+) {
+  const spawnProcess = vi.fn((_executable: string, _args: string[], _options?: unknown) => {
+    const child = children.shift();
+    if (child instanceof Error) throw child;
+    if (!child) throw new Error('No stub child available');
+    return child;
+  });
+  const runner = new LocalReplyRunner({
+    commands: { codex: options.executable ?? 'codex' },
+    resolve: async () => undefined,
+    spawn: spawnProcess as unknown as typeof spawn,
+    startupMs: options.startupMs ?? 1_000,
+    timeoutMs: 60_000,
+    platform: options.platform,
+    exists: options.exists,
   });
   return { runner, spawnProcess };
 }
@@ -515,6 +593,135 @@ describe('LocalReplyRunner', () => {
       else process.env.AGENT_HUB_HOME = previousHome;
       await rm(home, { recursive: true, force: true });
     }
+  });
+
+  it('queues a Codex reply after an active-writer failure', async () => {
+    const nativeId = session.nativeId!;
+    const activeWriter = `thread/resume failed: thread ${nativeId} already has an active writer (code -32600)`;
+    const message = 'Please continue';
+    const { runner, spawnProcess } = createCodexRunner([
+      closingChild(activeWriter, 1),
+      closingChild('', 0),
+    ]);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await runner.init();
+
+    try {
+      await runner.send(session, message);
+      expect(spawnProcess).toHaveBeenCalledTimes(2);
+      expect(spawnProcess.mock.calls[1]?.[1]).toEqual([
+        'queue', '--thread', nativeId, '--message', message,
+      ]);
+      expect(spawnProcess.mock.calls[1]?.[2]).toMatchObject({
+        cwd: process.cwd(),
+        shell: false,
+        windowsHide: true,
+      });
+      expect(runner.failure(session.id)).toBeUndefined();
+      expect(info).toHaveBeenCalledWith(`Codex chat ${nativeId} is open in the Codex app; reply queued`);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('reports a cleaned queue failure', async () => {
+    const nativeId = session.nativeId!;
+    const activeWriter = `thread ${nativeId} already has an active writer`;
+    const { runner, spawnProcess } = createCodexRunner([
+      closingChild(activeWriter, 1),
+      closingChild('Error: boom', 1),
+    ]);
+    await runner.init();
+
+    await expect(runner.send(session, text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: 'boom',
+    });
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the reply busy through a late active-writer fallback without recording success as a failure', async () => {
+    vi.useFakeTimers();
+    const primary = fakeChild();
+    const queue = fakeChild();
+    const { runner, spawnProcess } = createCodexRunner([primary, queue], { startupMs: 1 });
+    await runner.init();
+
+    const sending = runner.send(session, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1);
+    await sending;
+    expect(runner.isRunning(session.id)).toBe(true);
+
+    (primary.stderr as PassThrough).write(`thread ${session.nativeId} already has an active writer`);
+    primary.emit('close', 1);
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    expect(runner.isRunning(session.id)).toBe(true);
+    await expect(runner.send(session, 'Another message')).rejects.toBeInstanceOf(ReplyBusyError);
+
+    queue.emit('close', 0);
+    await Promise.resolve();
+    expect(runner.isRunning(session.id)).toBe(false);
+    expect(runner.failure(session.id)).toBeUndefined();
+  });
+
+  it('uses the friendly message and does not spawn a shim when the Windows binary is missing', async () => {
+    const shim = String.raw`C:\Users\Abhi\AppData\Roaming\npm\codex.cmd`;
+    const { runner, spawnProcess } = createCodexRunner(
+      [closingChild(`thread ${session.nativeId} already has an active writer`, 1)],
+      { executable: shim, platform: 'win32', exists: () => false },
+    );
+    await runner.init();
+
+    await expect(runner.send(session, text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: 'This chat is open in the Codex app. Close it there and send again.',
+    });
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not queue other Codex failures', async () => {
+    const { runner, spawnProcess } = createCodexRunner([
+      closingChild('Error: model not found', 1),
+    ]);
+    await runner.init();
+
+    await expect(runner.send(session, text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: 'model not found',
+    });
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps multiline shell metacharacters as one queue argument', async () => {
+    const message = 'first line\n"second line &|%';
+    const nativeId = session.nativeId!;
+    const { runner, spawnProcess } = createCodexRunner([
+      closingChild(`thread ${nativeId} already has an active writer`, 1),
+      closingChild('', 0),
+    ]);
+    await runner.init();
+
+    await runner.send(session, message);
+    expect(spawnProcess.mock.calls[1]?.[1]).toEqual([
+      'queue', '--thread', nativeId, '--message', message,
+    ]);
+    expect(spawnProcess.mock.calls[1]?.[2]).toMatchObject({ shell: false });
+  });
+
+  it('reports a queue spawn error as a cleaned reply failure', async () => {
+    const nativeId = session.nativeId!;
+    const { runner, spawnProcess } = createCodexRunner([
+      closingChild(`thread ${nativeId} already has an active writer`, 1),
+      new Error('Error: queue unavailable'),
+    ]);
+    await runner.init();
+
+    await expect(runner.send(session, text)).rejects.toMatchObject({
+      name: 'ReplyFailedError',
+      message: 'queue unavailable',
+    });
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a concurrent reply for the same session as busy', async () => {

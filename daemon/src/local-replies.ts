@@ -133,6 +133,35 @@ function quoteExecutable(executable: string): string {
   return `"${executable}"`;
 }
 
+function validateNativeId(nativeId: string): void {
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(nativeId)) {
+    throw new Error('Invalid session ID');
+  }
+}
+
+export function resolveCodexBinary(
+  executable: string,
+  exists: (candidate: string) => boolean = existsSync,
+): string | undefined {
+  if (/\.exe$/i.test(executable)) return executable;
+  if (!/\.(?:cmd|bat)$/i.test(executable)) return executable;
+
+  const pathApi = /^[A-Za-z]:[\\/]/.test(executable) || executable.includes('\\') ? path.win32 : path;
+  const packageRoot = pathApi.join(
+    pathApi.dirname(executable),
+    'node_modules',
+    '@openai',
+    'codex',
+    'node_modules',
+    '@openai',
+  );
+  const candidates = [
+    pathApi.join(packageRoot, 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'),
+    pathApi.join(packageRoot, 'codex-win32-arm64', 'vendor', 'aarch64-pc-windows-msvc', 'bin', 'codex.exe'),
+  ];
+  return candidates.find(exists);
+}
+
 function workingDirectoryForReply(agent: ReplyAgent, cwd: string | undefined): string {
   if (cwd === undefined) {
     if (agent !== 'antigravity') {
@@ -158,9 +187,7 @@ export function buildReplyCommand(
   executable: string,
   platform = process.platform,
 ): ReplyCommand {
-  if (!/^[A-Za-z0-9._-]{1,128}$/.test(nativeId)) {
-    throw new Error('Invalid session ID');
-  }
+  validateNativeId(nativeId);
 
   const shell = platform === 'win32' && /\.(?:cmd|bat)$/i.test(executable);
   if (agent === 'devin' && shell) {
@@ -205,6 +232,16 @@ export function buildReplyCommand(
   };
 }
 
+export function buildCodexQueueCommand(nativeId: string, text: string, cwd: string, binary: string): ReplyCommand {
+  validateNativeId(nativeId);
+  return {
+    command: binary,
+    args: ['queue', '--thread', nativeId, '--message', text],
+    shell: false,
+    cwd,
+  };
+}
+
 function execute(file: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(file, args, { encoding: 'utf8', windowsHide: true }, (error, stdout) => {
@@ -239,6 +276,12 @@ interface ActiveReply {
   timeout: NodeJS.Timeout;
 }
 
+interface QueueReplyResult {
+  exitCode: number;
+  stderr: string;
+  error?: Error;
+}
+
 export class LocalReplyRunner implements ReplyRunner {
   onChange?: (sessionId: string) => void;
   private readonly spawnProcess: typeof spawn;
@@ -249,6 +292,7 @@ export class LocalReplyRunner implements ReplyRunner {
   private readonly platform: NodeJS.Platform;
   private readonly commandRunner: CommandRunner;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly fileExists: (candidate: string) => boolean;
   private readonly executables = new Map<ReplyAgent, string>();
   private readonly active = new Map<string, ActiveReply>();
   private readonly backgroundInFlight = new Set<string>();
@@ -264,6 +308,7 @@ export class LocalReplyRunner implements ReplyRunner {
     timeoutMs?: number;
     startupMs?: number;
     platform?: NodeJS.Platform;
+    exists?: (candidate: string) => boolean;
   } = {}) {
     this.spawnProcess = options.spawn || spawn;
     this.resolve = options.resolve || resolveExecutable;
@@ -273,6 +318,7 @@ export class LocalReplyRunner implements ReplyRunner {
     this.timeoutMs = options.timeoutMs ?? 20 * 60_000;
     this.startupMs = options.startupMs ?? 3_000;
     this.platform = options.platform ?? process.platform;
+    this.fileExists = options.exists ?? existsSync;
   }
 
   init(): Promise<void> {
@@ -363,7 +409,7 @@ export class LocalReplyRunner implements ReplyRunner {
       }
     }
 
-    const command = buildReplyCommand(agent, session.nativeId, text, session.cwd, executable);
+    const command = buildReplyCommand(agent, session.nativeId, text, session.cwd, executable, this.platform);
     let child: ChildProcess;
     try {
       child = this.spawnProcess(command.command, command.args, {
@@ -381,7 +427,9 @@ export class LocalReplyRunner implements ReplyRunner {
     let stderrTail = '';
     let startupSettled = false;
     let finished = false;
+    let fallbackStarted = false;
     let pendingFailure: string | undefined;
+    let runningChild = child;
 
     return new Promise<void>((resolve, reject) => {
       let startupTimer: NodeJS.Timeout;
@@ -391,7 +439,7 @@ export class LocalReplyRunner implements ReplyRunner {
       let stopGraceTimer: NodeJS.Timeout | undefined;
       let spawned = child.pid !== undefined;
       let exited = false;
-      const finish = (code: number | null, error?: Error) => {
+      const finalize = (code: number | null, error?: Error) => {
         if (finished) return;
         finished = true;
         clearTimeout(startupTimer);
@@ -399,7 +447,7 @@ export class LocalReplyRunner implements ReplyRunner {
         if (forceKillTimer) clearTimeout(forceKillTimer);
         if (exitGraceTimer) clearTimeout(exitGraceTimer);
         if (stopGraceTimer) clearTimeout(stopGraceTimer);
-        if (this.active.get(session.id)?.child === child) this.active.delete(session.id);
+        if (this.active.get(session.id)?.child === runningChild) this.active.delete(session.id);
         const failed = Boolean(error || pendingFailure) || code !== 0;
         const rawFailureMessage = error
           ? stderrTail || error.message || `Failed to start ${agentLabels[agent]}`
@@ -419,21 +467,60 @@ export class LocalReplyRunner implements ReplyRunner {
         }
       };
 
+      const finish = (code: number | null, error?: Error) => {
+        if (finished || fallbackStarted) return;
+        const failed = Boolean(error || pendingFailure) || code !== 0;
+        if (agent === 'codex' && failed && /already has an active writer/i.test(stderrTail)) {
+          fallbackStarted = true;
+          const queueBinary = this.platform === 'win32'
+            ? resolveCodexBinary(executable, this.fileExists)
+            : executable;
+          if (!queueBinary) {
+            stderrTail = '';
+            finalize(1, new ReplyFailedError('', 'This chat is open in the Codex app. Close it there and send again.'));
+            return;
+          }
+          const queueCommand = buildCodexQueueCommand(session.nativeId, text, command.cwd, queueBinary);
+          void this.runCodexQueue(queueCommand, (queueChild) => {
+            runningChild = queueChild;
+            this.active.set(session.id, { child: queueChild, timeout });
+          }).then((result) => {
+            if (result.exitCode === 0 && !result.error) {
+              stderrTail = '';
+              pendingFailure = undefined;
+              this.lastFailure.delete(session.id);
+              console.info(`Codex chat ${session.nativeId} is open in the Codex app; reply queued`);
+              finalize(0);
+              return;
+            }
+
+            stderrTail = result.stderr;
+            const spawnError = result.error?.message;
+            pendingFailure = cleanReplyError(result.stderr)
+              || (spawnError ? cleanReplyError(spawnError) || spawnError : '')
+              || `Codex queue failed with exit code ${result.exitCode}`;
+            finalize(1, result.error);
+          });
+          return;
+        }
+        finalize(code, error);
+      };
+
       timeout = setTimeout(() => {
         if (finished) return;
         pendingFailure = 'Timed out after 20 minutes';
-        this.kill(child);
+        this.kill(runningChild);
         if (!finished) {
           forceKillTimer = setTimeout(() => {
             if (finished) return;
             try {
-              child.kill('SIGKILL');
+              runningChild.kill('SIGKILL');
             } catch {}
             if (finished) return;
             stopGraceTimer = setTimeout(() => {
               if (finished) return;
               pendingFailure = `Couldn't stop ${agentLabels[agent]} after timeout`;
-              finish(null);
+              finalize(null);
             }, 30_000);
           }, 10_000);
         }
@@ -471,6 +558,44 @@ export class LocalReplyRunner implements ReplyRunner {
       } catch (error) {
         pendingFailure ||= error instanceof Error ? error.message : String(error);
       }
+    });
+  }
+
+  private runCodexQueue(
+    command: ReplyCommand,
+    onSpawn: (child: ChildProcess) => void,
+  ): Promise<QueueReplyResult> {
+    return new Promise((resolve) => {
+      let child: ChildProcess;
+      try {
+        child = this.spawnProcess(command.command, command.args, {
+          cwd: command.cwd,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+      } catch (error) {
+        resolve({
+          exitCode: 1,
+          stderr: '',
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+        return;
+      }
+      onSpawn(child);
+
+      let stderr = '';
+      let settled = false;
+      const finish = (exitCode: number | null, error?: Error) => {
+        if (settled) return;
+        settled = true;
+        resolve({ exitCode: exitCode ?? 1, stderr, ...(error ? { error } : {}) });
+      };
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr = `${stderr}${chunk.toString()}`.slice(-500);
+      });
+      child.once('error', (error) => finish(null, error));
+      child.once('close', (code) => finish(code));
     });
   }
 
