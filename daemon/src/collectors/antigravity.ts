@@ -22,7 +22,8 @@ function normalizeWatchPath(value: string): string {
 
 function cleanUserText(text: string): string {
   const withoutOpeningTag = text.replace(/^\s*<USER_REQUEST>\s*/i, '');
-  const closingTag = withoutOpeningTag.toLowerCase().lastIndexOf('</user_request>');
+  const matches = [...withoutOpeningTag.matchAll(/<\/USER_REQUEST>/gi)];
+  const closingTag = matches.length ? matches[matches.length - 1]!.index! : -1;
   return (closingTag < 0 ? withoutOpeningTag : withoutOpeningTag.slice(0, closingTag)).trim();
 }
 

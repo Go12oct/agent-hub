@@ -806,6 +806,11 @@ describe('Antigravity transcript parser', () => {
       { type: 'user', role: 'user', text: 'Explain the </USER_REQUEST> tag\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nx\n</ADDITIONAL_METADATA>' },
     ], 'anti-mentioned-tag', '2025-01-02T12:00:05.000Z', Date.parse('2025-01-02T12:00:05.000Z'));
     expect(mentionedTag.messages[0]?.text).toBe('Explain the </USER_REQUEST> tag');
+
+    const unicodeBeforeTag = parseAntigravityRecords([
+      { type: 'user', role: 'user', text: 'İstanbul trip\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nx\n</ADDITIONAL_METADATA>' },
+    ], 'anti-unicode-tag', '2025-01-02T12:00:05.000Z', Date.parse('2025-01-02T12:00:05.000Z'));
+    expect(unicodeBeforeTag.messages[0]?.text).toBe('İstanbul trip');
   });
 
   it('extracts user prompt and conversation metadata from transcript records', async () => {
