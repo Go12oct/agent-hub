@@ -130,7 +130,8 @@ try {
   $pairItem.add_Click({
     $shim = Join-Path $script:installDirectory 'agent-hub.cmd'
     if (Test-Path $shim) {
-      Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', "`"$shim`" pair") -WorkingDirectory $script:installDirectory
+      $pairCommand = '"' + $shim + '" pair'
+      Start-Process -FilePath 'cmd.exe' -ArgumentList "/k `"$pairCommand`"" -WorkingDirectory $script:installDirectory
     }
   })
   $restartItem = $script:menu.Items.Add('Restart Agent Hub')
