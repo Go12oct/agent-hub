@@ -15,6 +15,8 @@ Tailscale.
    Scheduled Task, it uses your per-user Startup folder instead.
 3. Download **agent-hub-android.apk** from the same release and install it on
    your phone. Android may ask you to allow installation from that source.
+   The first release-signed APK requires a one-time uninstall of any earlier
+   Agent Hub APK and a new pairing; subsequent updates install over it.
 4. Right-click the Agent Hub tray icon and choose **Pair phone**. Scan the QR
    code shown in the opened terminal window with Agent Hub on your phone.
 

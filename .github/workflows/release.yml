@@ -102,14 +102,31 @@ jobs:
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - run: npm run build:web
       - run: npx cap sync android
-      - run: ./gradlew assembleDebug
+      - name: Build signed release APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" ]]; then
+            echo "::error::Repository secret ANDROID_KEYSTORE_BASE64 is required to publish a release APK."
+            exit 1
+          fi
+          if [[ -z "$ANDROID_KEYSTORE_PASSWORD" ]]; then
+            echo "::error::Repository secret ANDROID_KEYSTORE_PASSWORD is required to publish a release APK."
+            exit 1
+          fi
+          keystore_path="$RUNNER_TEMP/agent-hub-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          AGENT_HUB_KEYSTORE="$keystore_path" \
+          AGENT_HUB_KEYSTORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD" \
+            ./gradlew assembleRelease
         working-directory: android
       - name: Upload Android APK
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk agent-hub-android.apk
+          cp android/app/build/outputs/apk/release/app-release.apk agent-hub-android.apk
           gh release upload "$TAG" agent-hub-android.apk --clobber
 
   publish:
