@@ -160,6 +160,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
 export class CodexCollector extends WatchedCollector {
   name = 'codex';
   private hookOverrides = new Map<string, HookOverride>();
+  private approvalsClearedAt = new Map<string, number>();
   private readonly now: () => number;
   protected roots(): string[] { return [path.join(codexRoot(), 'sessions'), path.join(codexRoot(), 'archived_sessions')]; }
   protected watchTargets(): { paths: string[]; depth: number } { return { paths: this.roots(), depth: 3 }; }
@@ -212,16 +213,17 @@ export class CodexCollector extends WatchedCollector {
   }
   async clearNeedsInput(sessionId: string, emit: EmitSession | undefined = this.emit): Promise<void> {
     const nativeId = sessionId.startsWith('codex:') ? sessionId.slice('codex:'.length) : sessionId;
-    const hook = this.activeHookOverride(nativeId);
-    if (!hook || hook.status !== 'needs_input') return;
-    this.hookOverrides.delete(nativeId);
+    const now = this.now();
+    this.approvalsClearedAt.set(nativeId, now);
+    const hook = this.activeHookOverride(nativeId, now);
+    if (hook?.status === 'needs_input') this.hookOverrides.delete(nativeId);
     if (this.fileById.has(nativeId)) {
       await this.rescan();
       return;
     }
+    if (!hook || hook.status !== 'needs_input') return;
     const existing = this.sessions.get(`codex:${nativeId}`);
     if (!existing) return;
-    const now = this.now();
     const updated = {
       ...existing,
       status: inferStatus(existing.updatedAt, existing.lastRole, false, false, now),
@@ -250,7 +252,9 @@ export class CodexCollector extends WatchedCollector {
     const facts = parsed.statusFacts;
     if (!facts?.approvalRequested) return session;
     const timestamp = Date.parse(facts.approvalRequestedAt || '');
-    const recent = Number.isFinite(timestamp) && timestamp <= now && now - timestamp <= 30 * 60_000;
+    const clearedAt = this.approvalsClearedAt.get(session.nativeId);
+    const clearedRequest = clearedAt !== undefined && timestamp <= clearedAt;
+    const recent = !clearedRequest && Number.isFinite(timestamp) && timestamp <= now && now - timestamp <= 30 * 60_000;
     if (recent) return { ...session, status: 'needs_input', lastMessage: parsed.session.lastMessage || 'Waiting for approval' };
     return {
       ...session,

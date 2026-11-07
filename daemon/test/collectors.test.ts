@@ -190,6 +190,12 @@ describe('Codex collector hooks', () => {
     retains(session: AgentSession): boolean {
       return this.shouldRetain(session);
     }
+    getSession(id: string): AgentSession | undefined {
+      return this.sessions.get(id);
+    }
+    rescanForTest(): Promise<void> {
+      return this.rescan();
+    }
   }
 
   it('sets needs_input from the hook and clears it after PreToolUse or a changed transcript', async () => {
@@ -236,6 +242,56 @@ describe('Codex collector hooks', () => {
     await collector.stop();
     await changedCollector.stop();
     await expiringCollector.stop();
+  });
+
+  it('keeps a cleared approval cleared until a newer transcript approval appears', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-codex-cleared-approval-'));
+    const previousCodexHome = process.env.CODEX_HOME;
+    const sessionsDir = path.join(home, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const file = path.join(sessionsDir, 'rollout-cleared-approval.jsonl');
+    const base = Date.now();
+    let now = base - 10_000;
+    const timestamp = new Date(base - 20_000).toISOString();
+    const originalRecords = [
+      { type: 'session_meta', payload: { meta: { id: 'codex-cleared-approval', cwd: '/tmp/project', timestamp } } },
+      { type: 'event_msg', timestamp, payload: { type: 'exec_approval_request' } },
+    ];
+    await writeFile(file, `${originalRecords.map((record) => JSON.stringify(record)).join('\n')}\n`);
+    process.env.CODEX_HOME = home;
+    const collector = new TestCodexCollector(7, 300_000, () => now);
+    const emitted: AgentSession[] = [];
+    const emit = (session: AgentSession) => emitted.push(session);
+
+    try {
+      collector.start(emit);
+      await vi.waitFor(
+        () => expect(collector.getSession('codex:codex-cleared-approval')?.status).toBe('needs_input'),
+        { timeout: 5_000 },
+      );
+      await collector.applyHook({
+        session_id: 'codex-cleared-approval',
+        hook_event_name: 'PermissionRequest',
+        cwd: '/tmp/project',
+      }, emit);
+      await collector.clearNeedsInput('codex:codex-cleared-approval', emit);
+      expect(collector.getSession('codex:codex-cleared-approval')?.status).not.toBe('needs_input');
+
+      now = base;
+      const laterTimestamp = new Date(base - 5_000).toISOString();
+      await writeFile(file, `${originalRecords.map((record) => JSON.stringify(record)).join('\n')}\n${JSON.stringify({
+        type: 'event_msg',
+        timestamp: laterTimestamp,
+        payload: { type: 'exec_approval_request' },
+      })}\n`);
+      await collector.rescanForTest();
+      expect(collector.getSession('codex:codex-cleared-approval')?.status).toBe('needs_input');
+    } finally {
+      await collector.stop();
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });
 
