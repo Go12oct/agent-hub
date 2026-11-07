@@ -567,7 +567,7 @@ function DeckCard({
 
   return (
     <section
-      className={`deck-card${dragging ? ' dragging' : ''}${leaving ? ` leaving ${leaving}` : ''}`}
+      className={`deck-card needs_input${dragging ? ' dragging' : ''}${leaving ? ` leaving ${leaving}` : ''}`}
       data-depth={Math.min(depth, 3)}
       style={{
         zIndex: 10 - depth,
@@ -591,7 +591,7 @@ function DeckCard({
       <span className="deck-stamp deny-stamp" style={{ opacity: Math.min(1, Math.max(0, -dragX / 100)) }}>DENY</span>
       <div className="deck-who">
         <Avatar agent={item.session.agent} />
-        <span><strong>{agentLabels[item.session.agent]}</strong><span>{item.session.project}</span></span>
+        <span><strong className={`agent-name ${item.session.agent}`}>{agentLabels[item.session.agent]}</strong><span>{item.session.project}</span></span>
         <time>{relativeTime(approval?.requestedAt ?? item.session.updatedAt)}</time>
       </div>
       <h2 className="deck-title">{item.session.title}</h2>
@@ -642,12 +642,12 @@ function AgentTile({
   const steps = messages.length >= 100 ? '100+' : messages.filter((message) => message.role === 'tool').length;
 
   return (
-    <button className={`agent-tile${needsInput ? ' needs-input' : ''}`} onClick={onOpen}>
+    <button className={`agent-tile ${session.status}`} onClick={onOpen}>
       <span className="tile-top">
         <Avatar agent={session.agent} />
-        <span className="tile-agent"><strong>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
-        <span className={`tile-status ${needsInput ? 'waiting' : 'working'}`}>
-          <i />{needsInput ? 'Waiting' : 'Working'}
+        <span className="tile-agent"><strong className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
+        <span className={`status ${session.status}`}>
+          {statusLabels[session.status]}
         </span>
       </span>
       <span className="tile-title">{session.title}</span>
@@ -818,7 +818,7 @@ function dayGroups(sessions: AgentSession[]): Array<[string, AgentSession[]]> {
 }
 
 function Avatar({ agent, size = 'md' }: { agent: AgentKind; size?: 'sm' | 'md' }) {
-  return <span className={`avatar ${size}`} aria-hidden="true">{agentMarks[agent]}</span>;
+  return <span className={`avatar ${agent} ${size}`} aria-hidden="true">{agentMarks[agent]}</span>;
 }
 
 function Group({ title, tone, sessions, onOpen }: { title: string; tone?: string; sessions: AgentSession[]; onOpen: (id: string) => void }) {
@@ -841,7 +841,7 @@ function Row({ session, onOpen }: { session: AgentSession; onOpen: () => void })
       <span className="row-body">
         <span className="row-top">
           <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
-          {(session.status === 'needs_input' || session.status === 'working' || session.status === 'error') && <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>}
+          <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>
           <span className="row-time">{relativeTime(session.updatedAt)}</span>
         </span>
         <span className="row-title">{session.title}</span>
