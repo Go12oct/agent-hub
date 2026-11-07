@@ -116,6 +116,29 @@ describe('authenticated HTTP API', () => {
     } finally { await runtime.close(); }
   });
 
+  it('closes open SSE clients before closing the server', async () => {
+    const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
+    const address = await runtime.app.listen({ host: '127.0.0.1', port: 0 });
+    const abort = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await fetch(`${address}/api/events?token=test-token`, { signal: abort.signal });
+      const reader = response.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: snapshot');
+      await Promise.race([
+        runtime.close(),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error('runtime close timed out with an open SSE client')), 2_000);
+        }),
+      ]);
+      expect((await reader.read()).done).toBe(true);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      abort.abort();
+      await runtime.close();
+    }
+  });
+
   it('returns 404 for unknown sessions and 405 when replies are unsupported', async () => {
     const collector = new FakeCollector();
     const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });

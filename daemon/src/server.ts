@@ -66,7 +66,7 @@ export function createHub(
   config: HubConfig,
   options: { collectors?: Collector[]; staticDir?: string; replyRunner?: ReplyRunner } = {},
 ): HubRuntime {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, forceCloseConnections: true });
   const sessions = new Map<string, AgentSession>();
   const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
   const codex = new CodexCollector(config.lookbackDays, approvalHoldMs);
@@ -88,11 +88,13 @@ export function createHub(
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
   const approvals = new ApprovalBroker();
   const approvalsEnabled = config.approvals?.enabled !== false;
-  const eventClients = new Set<{ write: (data: string) => void }>();
+  const eventClients = new Set<{ write: (data: string) => void; end: () => void }>();
   let closePromise: Promise<void> | undefined;
   const closeRuntime = (): Promise<void> => {
     if (!closePromise) {
       closePromise = (async () => {
+        for (const client of eventClients) client.end();
+        eventClients.clear();
         approvals.cancelAll();
         await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
         await app.close();
@@ -243,7 +245,10 @@ export function createHub(
       Connection: 'keep-alive',
       'Access-Control-Allow-Origin': '*',
     });
-    const client = { write: (data: string) => reply.raw.write(data) };
+    const client = {
+      write: (data: string) => reply.raw.write(data),
+      end: () => reply.raw.end(),
+    };
     eventClients.add(client);
     client.write(`event: snapshot\ndata: ${JSON.stringify([...sessions.values()].map(present))}\n\n`);
     const heartbeat = setInterval(() => client.write(': heartbeat\n\n'), 20_000);
