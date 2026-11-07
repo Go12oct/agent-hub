@@ -138,7 +138,7 @@ describe('Codex transcript parser', () => {
     expect(parsed.session.lastMessage).toBe('Error: Quota exceeded');
   });
 
-  it('marks only a recent trailing event_msg approval request as needing input', () => {
+  it('clears Codex approval requests after a later response_item or event_msg', () => {
     const now = Date.now();
     const pending = parseCodexRecords([
       { type: 'session_meta', payload: { id: 'approval' } },
@@ -152,7 +152,7 @@ describe('Codex transcript parser', () => {
       { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'apply_patch_approval_request' } },
       { type: 'response_item', timestamp: new Date(now).toISOString(), payload: { type: 'function_call', name: 'apply_patch' } },
     ], 'approval-resolved', now);
-    expect(resolved.session.status).toBe('needs_input');
+    expect(resolved.session.status).not.toBe('needs_input');
 
     const superseded = parseCodexRecords([
       { type: 'session_meta', payload: { id: 'approval-superseded' } },

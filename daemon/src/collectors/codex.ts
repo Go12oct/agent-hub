@@ -62,6 +62,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     const record = records[index]!;
     timestamp = record.timestamp || timestamp;
     const payload = record.payload || {};
+    if (record.type === 'response_item') approvalRequested = false;
     if (record.type === 'response_item' && payload.type === 'message') {
       const role = payload.role;
       if (role === 'user' || role === 'assistant') lastActivityIndex = index;
