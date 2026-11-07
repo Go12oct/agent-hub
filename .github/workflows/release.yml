@@ -4,20 +4,33 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux
-          - os: windows-latest
-            artifact: windows
-    runs-on: ${{ matrix.os }}
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            prerelease=()
+            if [[ "$TAG" == *-* ]]; then
+              prerelease+=(--prerelease)
+            fi
+            gh release create "$TAG" --title "Agent Hub $TAG" --generate-notes "${prerelease[@]}"
+          fi
+
+  windows:
+    needs: create-release
+    runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,22 +40,51 @@ jobs:
       - run: npm ci
       - run: npm run build:web
       - run: npm run build:daemon
-      - if: runner.os == 'Windows'
-        run: node daemon/scripts/build-sea.mjs
-      - uses: actions/upload-artifact@v4
+      - name: Build Windows executable
         continue-on-error: true
-        with:
-          name: daemon-${{ matrix.artifact }}
-          retention-days: 3
-          path: |
-            daemon/dist/agent-hub.cjs
-            daemon/dist/hook-bridge.cjs
-            daemon/dist/agent-hub.exe
-            daemon/public/
-          if-no-files-found: ignore
+        run: node daemon/scripts/build-sea.mjs
+      - name: Assemble Windows package
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'agent-hub'
+          $dist = Join-Path $packageRoot 'daemon\dist'
+          $public = Join-Path $packageRoot 'daemon\public'
+          New-Item -ItemType Directory -Force -Path $dist, $public | Out-Null
+          Copy-Item 'daemon/dist/agent-hub.cjs' $dist -Force
+          Copy-Item 'daemon/dist/hook-bridge.cjs' $dist -Force
+          Copy-Item 'daemon/public/*' $public -Recurse -Force
+          if (Test-Path 'daemon/dist/agent-hub.exe') {
+            Copy-Item 'daemon/dist/agent-hub.exe' $dist -Force
+          }
+          Copy-Item 'scripts/install.ps1' $packageRoot -Force
+          Copy-Item 'scripts/uninstall.ps1' $packageRoot -Force
+          Copy-Item 'scripts/tray.ps1' $packageRoot -Force
+          Copy-Item 'scripts/Install-AgentHub.cmd' $packageRoot -Force
+          Copy-Item 'scripts/Uninstall-AgentHub.cmd' $packageRoot -Force
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'agent-hub-windows.zip'
+          Compress-Archive -Path $packageRoot -DestinationPath $zipPath -Force
+      - name: Upload Windows assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $assets = @(
+            'agent-hub-windows.zip',
+            'daemon/dist/agent-hub.cjs',
+            'daemon/dist/hook-bridge.cjs',
+            'scripts/install.ps1'
+          )
+          if (Test-Path 'daemon/dist/agent-hub.exe') {
+            $assets += 'daemon/dist/agent-hub.exe'
+          }
+          gh release upload "$env:TAG" @assets --clobber
 
   android:
+    needs: create-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -62,49 +104,10 @@ jobs:
       - run: npx cap sync android
       - run: ./gradlew assembleDebug
         working-directory: android
-      - uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: android-apk
-          retention-days: 3
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-
-  publish:
-    needs: [build, android]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-      - name: Assemble Windows package
+      - name: Upload Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          mkdir -p agent-hub/daemon/dist agent-hub/daemon/public
-          cp release-assets/daemon-windows/dist/agent-hub.cjs agent-hub/daemon/dist/
-          cp release-assets/daemon-windows/dist/hook-bridge.cjs agent-hub/daemon/dist/
-          cp -R release-assets/daemon-windows/public/. agent-hub/daemon/public/
-          if [ -f release-assets/daemon-windows/dist/agent-hub.exe ]; then
-            cp release-assets/daemon-windows/dist/agent-hub.exe agent-hub/daemon/dist/
-            cp release-assets/daemon-windows/dist/agent-hub.exe release-assets/agent-hub.exe
-          fi
-          cp scripts/install.ps1 agent-hub/install.ps1
-          cp scripts/uninstall.ps1 agent-hub/uninstall.ps1
-          cp scripts/tray.ps1 agent-hub/tray.ps1
-          cp scripts/Install-AgentHub.cmd agent-hub/Install-AgentHub.cmd
-          cp scripts/Uninstall-AgentHub.cmd agent-hub/Uninstall-AgentHub.cmd
-          cp scripts/install.ps1 release-assets/install.ps1
-          cp release-assets/daemon-windows/dist/agent-hub.cjs release-assets/agent-hub.cjs
-          cp release-assets/daemon-windows/dist/hook-bridge.cjs release-assets/hook-bridge.cjs
-          cp release-assets/android-apk/app-debug.apk release-assets/agent-hub-android.apk
-          zip -qr agent-hub-windows.zip agent-hub
-      - uses: softprops/action-gh-release@v2
-        with:
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            agent-hub-windows.zip
-            release-assets/agent-hub.cjs
-            release-assets/hook-bridge.cjs
-            release-assets/agent-hub.exe
-            release-assets/agent-hub-android.apk
-            release-assets/install.ps1
-          fail_on_unmatched_files: false
+          cp android/app/build/outputs/apk/debug/app-debug.apk agent-hub-android.apk
+          gh release upload "$TAG" agent-hub-android.apk --clobber

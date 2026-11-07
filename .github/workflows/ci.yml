@@ -31,7 +31,7 @@ jobs:
         continue-on-error: true
         with:
           name: agent-hub-daemon-${{ runner.os }}
-          retention-days: 3
+          retention-days: 1
           path: |
             daemon/dist/agent-hub.cjs
             daemon/dist/hook-bridge.cjs
@@ -64,5 +64,5 @@ jobs:
         continue-on-error: true
         with:
           name: agent-hub-android-debug
-          retention-days: 3
+          retention-days: 1
           path: android/app/build/outputs/apk/debug/app-debug.apk
