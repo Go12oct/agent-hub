@@ -13,7 +13,7 @@ import { installCodexHooks, uninstallCodexHooks } from './codex-hooks.js';
 import { runHookBridge } from './hook-bridge.js';
 import { firewallRuleScript } from './firewall.js';
 import { lanUrls, startServer } from './server.js';
-import { installWindowsService, isDaemonHealthy, uninstallWindowsService } from './windows-service.js';
+import { installWindowsService, isDaemonHealthy, requestDaemonShutdown, uninstallWindowsService } from './windows-service.js';
 
 function runProcess(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -179,6 +179,7 @@ async function run(): Promise<void> {
       port: config.port,
       runProcess,
       isHealthy: isDaemonHealthy,
+      stopRunning: (port) => requestDaemonShutdown(port, config.token),
       startDetached: (command, childArgs) => {
         const child = spawn(command, childArgs, { detached: true, stdio: 'ignore', windowsHide: true });
         child.once('error', (error) => console.error(`Could not start Agent Hub: ${(error as Error).message}`));
