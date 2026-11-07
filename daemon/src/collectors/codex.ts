@@ -10,6 +10,11 @@ function codexRoot(): string {
   return process.env.CODEX_HOME || path.join(agentHome(), '.codex');
 }
 
+function formatErrorMessage(text?: string): string | undefined {
+  const trimmed = text?.trim();
+  return trimmed ? `Error: ${trimmed}`.slice(0, 280) : undefined;
+}
+
 async function jsonlFiles(dir: string): Promise<string[]> {
   const files: string[] = [];
   const queue = [dir];
@@ -49,6 +54,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
   let lastMessage: string | undefined;
   let completed = false;
   let lastErrorIndex = -1;
+  let lastErrorMessage: string | undefined;
   let lastActivityIndex = -1;
   let approvalRequested = false;
   let timestamp = meta.timestamp;
@@ -99,7 +105,10 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
         lastActivityIndex = index;
       } else if (kind === 'turn_aborted') {
         completed = true;
-      } else if (kind === 'error') lastErrorIndex = index;
+      } else if (kind === 'error') {
+        lastErrorIndex = index;
+        lastErrorMessage = typeof payload.message === 'string' ? payload.message : undefined;
+      }
     }
   }
   const error = lastErrorIndex > lastActivityIndex;
@@ -120,7 +129,8 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
         : typeof meta.git_branch === 'string' ? meta.git_branch : undefined,
       updatedAt, startedAt: meta.timestamp,
       status: explicitStatus || inferStatus(updatedAt, lastRole, completed, error, now),
-      lastMessage: explicitStatus && !lastMessage ? 'Waiting for approval' : lastMessage?.slice(-280),
+      lastMessage: error ? formatErrorMessage(lastErrorMessage)
+        : explicitStatus && !lastMessage ? 'Waiting for approval' : lastMessage?.slice(-280),
       lastRole,
     }),
     messages: output,

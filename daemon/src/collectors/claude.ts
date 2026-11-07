@@ -49,6 +49,23 @@ export function claudeHookOverride(
   return fileModifiedAt <= hookAt ? status : undefined;
 }
 
+function isApiErrorMessage(text: string): boolean {
+  return /^\s*API Error\s*:/i.test(text);
+}
+
+function errorText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (value && typeof value === 'object' && 'message' in value) {
+    return errorText((value as { message?: unknown }).message);
+  }
+  return undefined;
+}
+
+function formatErrorMessage(text?: string): string | undefined {
+  const trimmed = text?.trim();
+  return trimmed ? `Error: ${trimmed}`.slice(0, 280) : undefined;
+}
+
 export function parseClaudeRecords(
   records: Record<string, any>[],
   nativeId: string,
@@ -63,6 +80,7 @@ export function parseClaudeRecords(
   let updatedAt = fileModifiedAt;
   let lastRole: AgentSession['lastRole'];
   let lastMessage: string | undefined;
+  let lastErrorMessage: string | undefined;
   let complete = false;
   let errored = false;
   for (const row of records) {
@@ -77,6 +95,10 @@ export function parseClaudeRecords(
       if (mappedRole === 'user' && !title) title = claudeTitle(text);
       lastRole = mappedRole;
       lastMessage = text;
+      if (role === 'assistant' && isApiErrorMessage(text)) {
+        errored = true;
+        lastErrorMessage = text;
+      }
       if (mappedRole === 'user') complete = false;
     }
     if (role === 'assistant') {
@@ -86,7 +108,12 @@ export function parseClaudeRecords(
       complete = stopReason === 'end_turn' || (stopReason !== 'tool_use' && !hasToolUse);
     }
     if (row.type === 'summary' && typeof row.summary === 'string' && !title) title = row.summary.slice(0, 180);
-    if (row.type === 'stop_failure') errored = true;
+    const recordError = errorText(row.error) || errorText(row.message?.error)
+      || (row.type === 'stop_failure' && typeof row.message === 'string' ? errorText(row.message) : undefined);
+    if (row.type === 'stop_failure' || recordError) {
+      errored = true;
+      if (recordError) lastErrorMessage = recordError;
+    }
     if (row.timestamp) {
       const at = isoOrNow(row.timestamp);
       if (Date.parse(at) > Date.parse(updatedAt)) updatedAt = at;
@@ -98,7 +125,7 @@ export function parseClaudeRecords(
     session: buildSession({
       agent: 'claude-code', nativeId, title, cwd, branch, updatedAt, startedAt: records[0]?.timestamp,
       status: inferStatus(updatedAt, lastRole, complete, errored, now),
-      lastMessage: lastMessage?.slice(-280), lastRole,
+      lastMessage: errored ? formatErrorMessage(lastErrorMessage) : lastMessage?.slice(-280), lastRole,
     }),
     messages,
     statusFacts,
@@ -139,6 +166,7 @@ export class ClaudeCollector extends WatchedCollector {
     const status = mapClaudeHook(payload.hook_event_name, payload);
     if (!status) return;
     const now = this.now();
+    const failureMessage = formatErrorMessage(errorText(payload.error) || payload.message);
     this.hookOverrides.set(payload.session_id, { status, at: now, message: payload.message });
     const existing = this.sessions.get(`claude-code:${payload.session_id}`);
     if (existing) {
@@ -146,7 +174,9 @@ export class ClaudeCollector extends WatchedCollector {
         ...existing,
         status,
         updatedAt: new Date(now).toISOString(),
-        ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
+        ...(status === 'error'
+          ? { lastMessage: failureMessage }
+          : status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
       };
       this.sessions.set(existing.id, updated);
       emit?.(updated);
@@ -154,6 +184,7 @@ export class ClaudeCollector extends WatchedCollector {
       const updated = buildSession({
         agent: 'claude-code', nativeId: payload.session_id, cwd: payload.cwd,
         title: payload.message || 'Claude Code session', status, updatedAt: new Date(now).toISOString(),
+        ...(status === 'error' ? { lastMessage: failureMessage } : {}),
         ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
       });
       this.sessions.set(updated.id, updated);

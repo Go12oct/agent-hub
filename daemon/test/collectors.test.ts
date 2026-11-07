@@ -117,6 +117,16 @@ describe('Codex transcript parser', () => {
     ]).session.status).toBe('done');
   });
 
+  it('uses the error event message as the Codex session last message', () => {
+    const now = Date.now();
+    const parsed = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'codex-error' } },
+      { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'error', message: 'Quota exceeded' } },
+    ], 'codex-error', now);
+    expect(parsed.session.status).toBe('error');
+    expect(parsed.session.lastMessage).toBe('Error: Quota exceeded');
+  });
+
   it('marks only a recent trailing event_msg approval request as needing input', () => {
     const now = Date.now();
     const pending = parseCodexRecords([
@@ -339,6 +349,15 @@ describe('Claude Code hooks', () => {
     await collector.applyHook({ session_id: 'hook-fixture', hook_event_name: 'Notification', cwd: '/tmp/project', message: 'Permission needed' });
     expect(emitted.at(-1).status).toBe('needs_input');
     expect(emitted.at(-1).lastMessage).toBe('Permission needed');
+    await collector.applyHook({
+      session_id: 'hook-fixture', hook_event_name: 'StopFailure', cwd: '/tmp/project', error: 'The API request failed',
+    });
+    expect(emitted.at(-1).status).toBe('error');
+    expect(emitted.at(-1).lastMessage).toBe('Error: The API request failed');
+    await collector.applyHook({
+      session_id: 'hook-fixture', hook_event_name: 'StopFailure', cwd: '/tmp/project', message: 'Process exited unexpectedly',
+    });
+    expect(emitted.at(-1).lastMessage).toBe('Error: Process exited unexpectedly');
     await collector.stop();
   });
 
@@ -360,6 +379,25 @@ describe('Claude Code hooks', () => {
     ], 'claude-tool-use', '2025-01-02T11:00:04.000Z', Date.parse('2025-01-02T11:00:04.000Z'));
     expect(parsed.session.status).toBe('working');
     expect(parsed.statusFacts.completed).toBe(false);
+  });
+
+  it('uses Claude API error text and transcript error fields as the session last message', () => {
+    const now = Date.parse('2025-01-02T11:00:04.000Z');
+    const apiError = parseClaudeRecords([
+      {
+        type: 'assistant',
+        timestamp: new Date(now).toISOString(),
+        message: { role: 'assistant', content: 'API Error: 500 missing csrf token' },
+      },
+    ], 'claude-api-error', new Date(now).toISOString(), now);
+    expect(apiError.session.status).toBe('error');
+    expect(apiError.session.lastMessage).toBe('Error: API Error: 500 missing csrf token');
+
+    const stopFailure = parseClaudeRecords([
+      { type: 'stop_failure', timestamp: new Date(now).toISOString(), error: { message: 'Tool execution failed' } },
+    ], 'claude-stop-failure', new Date(now).toISOString(), now);
+    expect(stopFailure.session.status).toBe('error');
+    expect(stopFailure.session.lastMessage).toBe('Error: Tool execution failed');
   });
 });
 
