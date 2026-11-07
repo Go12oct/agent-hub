@@ -163,7 +163,7 @@ export function buildReplyCommand(
   if (agent === 'codex') {
     return {
       command,
-      args: ['exec', 'resume', nativeId, '-'],
+      args: ['exec', 'resume', '--skip-git-repo-check', nativeId, '-'],
       stdin: text,
       shell,
       cwd: workingDirectory,

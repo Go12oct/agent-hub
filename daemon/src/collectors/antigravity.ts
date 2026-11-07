@@ -20,6 +20,16 @@ function normalizeWatchPath(value: string): string {
   return value.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
+function cleanUserText(text: string): string {
+  const withoutOpeningTag = text.replace(/^<USER_REQUEST>\r?\n/i, '');
+  const closingTag = withoutOpeningTag.indexOf('\n</USER_REQUEST>');
+  return (closingTag < 0 ? withoutOpeningTag : withoutOpeningTag.slice(0, closingTag)).trim();
+}
+
+function isSystemMessage(text: string): boolean {
+  return text.trim().startsWith('The following is a <SYSTEM_MESSAGE>');
+}
+
 export function parseAntigravityRecords(records: Record<string, any>[], id: string, modifiedAt: string, now = Date.now()): {
   session: AgentSession;
   messages: SessionMessage[];
@@ -39,13 +49,11 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
     const row = records[index]!;
     const kind = String(row.type || row.role || row.event || '').toLowerCase();
     let text = typeof row.text === 'string' ? row.text : textFromContent(row.content ?? row.message?.content) || row.message?.text;
-    if (typeof text === 'string') {
-      text = text.replace(/^<USER_REQUEST>\s*/i, '').replace(/\s*<\/USER_REQUEST>$/i, '');
-    }
     const roleName = String(row.role || row.source || row.message?.role || kind).toLowerCase();
     const role = roleName.includes('user') || roleName.includes('human') ? 'user'
       : roleName.includes('assistant') || roleName.includes('model') || roleName.includes('agent') ? 'assistant'
         : roleName.includes('system') || roleName.includes('tool') ? 'tool' : undefined;
+    if (role === 'user' && typeof text === 'string') text = cleanUserText(text);
     if (typeof row.cwd === 'string') cwd = row.cwd;
     if (typeof row.branch === 'string') branch = row.branch;
     if (row.timestamp || row.created_at || row.at) {
@@ -53,13 +61,17 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       if (Date.parse(at) > Date.parse(updatedAt)) updatedAt = at;
     }
     if (role && typeof text === 'string' && text.trim()) {
-      messages.push(message(text, role, row.timestamp));
-      if (role === 'user' && !title) title = text.trim().slice(0, 180);
-      lastRole = role;
-      lastMessage = text;
-      if (role === 'user' || role === 'assistant') lastActivityIndex = index;
-      complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
-        || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
+      if (role === 'tool') {
+        if (!isSystemMessage(text)) complete = false;
+      } else if (!isSystemMessage(text)) {
+        messages.push(message(text, role, row.timestamp));
+        if (role === 'user' && !title) title = text.trim().slice(0, 180);
+        lastRole = role;
+        lastMessage = text;
+        lastActivityIndex = index;
+        complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
+          || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
+      }
     }
     const explicitFailure = ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase());
     const abortOnly = /abort/.test(kind) && !/error|fail/.test(kind) && !explicitFailure;

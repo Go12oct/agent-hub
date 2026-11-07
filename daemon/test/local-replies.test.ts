@@ -57,7 +57,7 @@ describe('buildReplyCommand', () => {
     expect(command.shell).toBe(shell);
     expect(command.cwd).toBe(process.cwd());
     if (agent === 'codex') {
-      expect(command.args).toEqual(['exec', 'resume', 'session_123-abc', '-']);
+      expect(command.args).toEqual(['exec', 'resume', '--skip-git-repo-check', 'session_123-abc', '-']);
       expect(command.stdin).toBe(text);
     } else {
       expect(command.args).toEqual(shellShim ? [resumeFlag, 'session_123-abc', '-p'] : [resumeFlag, 'session_123-abc', '-p', text]);

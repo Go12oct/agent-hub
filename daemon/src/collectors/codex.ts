@@ -8,6 +8,10 @@ import type { ParsedWatchedSession } from './watched.js';
 import type { EmitSession } from './types.js';
 import { activeHookOverride, hookOverrideForFile, type HookOverride } from './hook-overrides.js';
 
+function isCodexPromptPreamble(text: string): boolean {
+  return /^(?:<environment_context>|<instructions>|<user_instructions>|<system-reminder>|# AGENTS\.md instructions)/i.test(text.trim());
+}
+
 export interface CodexHookPayload {
   session_id?: string;
   hook_event_name?: string;
@@ -91,8 +95,9 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       const text = textFromContent(payload.content);
       if (!text) continue;
       if (role === 'user') {
+        if (isCodexPromptPreamble(text)) continue;
         output.push(message(text, 'user', record.timestamp));
-        if (!title && !/<environment_context>|<instructions>|<system-reminder>/i.test(text)) {
+        if (!title && !isCodexPromptPreamble(text)) {
           title = text.trim().slice(0, 180);
         }
         lastRole = 'user';
@@ -113,9 +118,10 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       if (kind === 'user_message' || kind === 'agent_message') {
         const role = kind === 'user_message' ? 'user' : 'assistant';
         lastActivityIndex = index;
+        if (role === 'user' && isCodexPromptPreamble(text)) continue;
         if (text) output.push(message(text, role, record.timestamp));
         if (role === 'user') {
-          if (!title && text && !/<environment_context>|<instructions>/i.test(text)) title = text.trim().slice(0, 180);
+          if (!title && text && !isCodexPromptPreamble(text)) title = text.trim().slice(0, 180);
           completed = false;
         } else completed = false;
         lastRole = role;

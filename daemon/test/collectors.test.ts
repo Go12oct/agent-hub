@@ -93,6 +93,35 @@ async function collectFixture(
 }
 
 describe('Codex transcript parser', () => {
+  it('omits injected prompt context from chat messages and session previews', () => {
+    const parsed = parseCodexRecords([
+      { type: 'session_meta', payload: { id: 'codex-preamble' } },
+      {
+        type: 'response_item',
+        timestamp: '2025-01-02T10:00:01.000Z',
+        payload: { type: 'message', role: 'user', content: '  <environment_context>Local machine context</environment_context>' },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2025-01-02T10:00:02.000Z',
+        payload: { type: 'message', role: 'user', content: 'Compare these files' },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2025-01-02T10:00:03.000Z',
+        payload: { type: 'message', role: 'assistant', content: 'The comparison is complete.', phase: 'final' },
+      },
+    ], 'codex-preamble', Date.parse('2025-01-02T10:00:04.000Z'));
+
+    expect(parsed.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: 'Compare these files' },
+      { role: 'assistant', text: 'The comparison is complete.' },
+    ]);
+    expect(parsed.session.title).toBe('Compare these files');
+    expect(parsed.session.lastMessage).toBe('The comparison is complete.');
+    expect(parsed.session.lastRole).toBe('assistant');
+  });
+
   it('extracts title, project, branch, status, and messages from rollout JSONL', async () => {
     const now = Date.parse('2025-01-02T10:00:09.000Z');
     const parsed = parseCodexRecords(await fixtureLines('.codex/sessions/2025/01/02/rollout-codex-fixture.jsonl'), 'codex-fixture', now);
@@ -724,6 +753,28 @@ describe('Claude Code hooks', () => {
 });
 
 describe('Antigravity transcript parser', () => {
+  it('trims injected user wrappers and omits tool and system messages', () => {
+    const userText = 'Reply with exactly: first\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: …\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>…</USER_SETTINGS_CHANGE>';
+    const parsed = parseAntigravityRecords([
+      { type: 'user', role: 'user', text: userText },
+      { type: 'tool', role: 'tool', text: 'Tool output' },
+      { type: 'assistant', role: 'assistant', text: 'The following is a <SYSTEM_MESSAGE>Internal context</SYSTEM_MESSAGE>' },
+      { type: 'assistant', role: 'assistant', text: 'Done', turnComplete: true },
+    ], 'anti-wrapped', '2025-01-02T12:00:05.000Z', Date.parse('2025-01-02T12:00:05.000Z'));
+
+    expect(parsed.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: 'Reply with exactly: first' },
+      { role: 'assistant', text: 'Done' },
+    ]);
+    expect(parsed.session.lastMessage).toBe('Done');
+    expect(parsed.session.lastRole).toBe('assistant');
+
+    const openedWrapper = parseAntigravityRecords([
+      { type: 'user', role: 'user', text: '<USER_REQUEST>\nKeep this request\n</USER_REQUEST>\n<ADDITIONAL_METADATA>' },
+    ], 'anti-open-wrapper', '2025-01-02T12:00:05.000Z', Date.parse('2025-01-02T12:00:05.000Z'));
+    expect(openedWrapper.messages[0]?.text).toBe('Keep this request');
+  });
+
   it('extracts user prompt and conversation metadata from transcript records', async () => {
     const rows = await fixtureLines('.gemini/antigravity-cli/brain/anti-fixture/.system_generated/logs/transcript.jsonl');
     const now = Date.parse('2025-01-02T12:00:05.000Z');
