@@ -419,7 +419,7 @@ function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing
         )}
         <p className="hint">On your PC, open <b>Agent Hub - Pair Phone</b> on the Desktop to show the QR code.</p>
         {error && <div className="error">{error}</div>}
-        {onCancel && <button type="button" className="secondary" onClick={onCancel}>Keep current PC</button>}
+        {onCancel && <button type="button" className="secondary" onClick={onCancel} disabled={connecting}>Keep current PC</button>}
         <button className="link-btn" onClick={() => setManual((value) => !value)}>
           Enter details manually <ChevronDown size={16} className={manual ? 'flip' : ''} />
         </button>
