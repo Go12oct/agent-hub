@@ -221,6 +221,82 @@ describe('ntfy notifications', () => {
     }
   });
 
+  it('does not publish a needs-you alert after a newer working update', async () => {
+    let clearCalls = 0;
+    let releaseRetry: ((response: Response) => void) | undefined;
+    const publishedSequences: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        clearCalls += 1;
+        if (clearCalls === 1) return new Response(null, { status: 503 });
+        if (clearCalls === 2) return new Promise<Response>((resolve) => { releaseRetry = resolve; });
+      }
+      if (init?.method === 'POST') {
+        const headers = init.headers as Record<string, string>;
+        publishedSequences.push(headers['X-Sequence-ID']!);
+      }
+      return new Response(null, { status: 200 });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+      const pendingSessionId = 'claude-code:pending-clear';
+      const approval = { id: 'ap-slow', toolName: 'Bash', summary: 'Run: ls', requestedAt: new Date().toISOString() };
+      await notifier.update(session({ id: pendingSessionId, status: 'needs_input', approval, approvals: [approval] }));
+      await notifier.update(session({ id: pendingSessionId, status: 'needs_input', approvals: [] }));
+
+      const overlappingSessionId = 'claude-code:overlap';
+      const needsInputUpdate = notifier.update(session({ id: overlappingSessionId, status: 'needs_input' }));
+      await vi.waitFor(() => expect(releaseRetry).toBeTypeOf('function'));
+      const workingUpdate = notifier.update(session({ id: overlappingSessionId, status: 'working' }));
+      releaseRetry!(new Response(null, { status: 200 }));
+      await Promise.all([needsInputUpdate, workingUpdate]);
+
+      expect(publishedSequences).not.toContain(sessionNotificationSequence(overlappingSessionId));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('drops a queued clear when a needs-you sequence becomes live again', async () => {
+    vi.useFakeTimers();
+    const clearUrls: string[] = [];
+    const publishedSequences: string[] = [];
+    let failNextClear = true;
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        clearUrls.push(url);
+        if (failNextClear) {
+          failNextClear = false;
+          return new Response(null, { status: 503 });
+        }
+      } else if (init?.method === 'POST') {
+        const headers = init.headers as Record<string, string>;
+        publishedSequences.push(headers['X-Sequence-ID']!);
+      }
+      return new Response(null, { status: 200 });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+      const sessionId = 'claude-code:live-again';
+      const sequenceId = sessionNotificationSequence(sessionId);
+      await notifier.update(session({ id: sessionId, status: 'needs_input' }));
+      await notifier.update(session({ id: sessionId, status: 'working' }));
+      expect(clearUrls).toEqual([expect.stringMatching(new RegExp(`/${sequenceId}/clear$`))]);
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      await notifier.update(session({ id: sessionId, status: 'needs_input' }));
+      await notifier.update(session({ id: 'codex:unrelated', agent: 'codex', status: 'working' }));
+
+      expect(publishedSequences.filter((id) => id === sequenceId)).toHaveLength(2);
+      expect(clearUrls).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('suppresses old first-seen sessions unless they have a pending approval', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const oldUpdatedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
