@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -596,6 +596,8 @@ describe('watched collector cache', () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-watched-restart-'));
     const file = path.join(home, 'session.jsonl');
     await writeFile(file, '{"fixture":true}\n');
+    const fileMtime = new Date('2020-01-02T03:04:05.000Z');
+    await utimes(file, fileMtime, fileMtime);
     const previousConfigDir = process.env.AGENT_HUB_CONFIG_DIR;
     process.env.AGENT_HUB_CONFIG_DIR = path.join(home, 'config');
     const oldUpdatedAt = new Date(Date.now() - 60 * 60_000).toISOString();
