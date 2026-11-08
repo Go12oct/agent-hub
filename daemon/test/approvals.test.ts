@@ -186,7 +186,11 @@ describe('ntfy notifications', () => {
       updatedAt: new Date().toISOString(),
       lastMessage: 'Waiting for your reply.',
     });
-    expect(ntfyMessage(waiting).title).toBe('Devin needs you — repo');
+    expect(ntfyMessage(waiting)).toMatchObject({
+      title: 'Devin is waiting on you — repo',
+      body: 'Waiting for your reply.',
+      priority: 'default',
+    });
 
     await notifier.update({ ...waiting, status: 'working' });
     await notifier.update(waiting);
@@ -195,7 +199,7 @@ describe('ntfy notifications', () => {
     const [publishUrl, publishInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     const sequenceId = sessionNotificationSequence(sessionId);
     expect(publishUrl).toBe('https://ntfy.sh/t');
-    expect(publishInit.headers).toMatchObject({ 'X-Sequence-ID': sequenceId });
+    expect(publishInit.headers).toMatchObject({ 'X-Sequence-ID': sequenceId, Priority: 'default' });
 
     await notifier.update({ ...waiting, status: 'working', updatedAt: new Date().toISOString() });
     expect(fetchImpl).toHaveBeenCalledTimes(2);

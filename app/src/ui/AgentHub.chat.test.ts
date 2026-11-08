@@ -4,7 +4,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
-import { ChatView } from './AgentHub';
+import { ChatView, statusLabel } from './AgentHub';
 
 let root: Root | undefined;
 
@@ -13,6 +13,32 @@ afterEach(async () => {
   root = undefined;
   document.body.replaceChildren();
   vi.unstubAllGlobals();
+});
+
+describe('session status labels', () => {
+  it('uses waiting copy for approval-less Devin sessions only', () => {
+    const waiting: AgentSession = {
+      id: 'devin:waiting-session',
+      agent: 'devin',
+      nativeId: 'waiting-session',
+      title: 'Devin session',
+      status: 'needs_input',
+      canReply: false,
+      updatedAt: new Date().toISOString(),
+      machine: 'desktop',
+    };
+    expect(statusLabel(waiting)).toBe('Waiting on you');
+    expect(statusLabel({ ...waiting, agent: 'claude-code' })).toBe('Needs you');
+    expect(statusLabel({
+      ...waiting,
+      approval: {
+        id: 'approval',
+        toolName: 'Write',
+        summary: 'Write a file',
+        requestedAt: new Date().toISOString(),
+      },
+    })).toBe('Needs you');
+  });
 });
 
 describe('ChatView reply stop control', () => {

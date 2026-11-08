@@ -27,6 +27,14 @@ const statusLabels: Record<AgentSession['status'], string> = {
   needs_input: 'Needs you', working: 'Working', done: 'Done', idle: 'Idle', error: 'Error',
 };
 
+export function statusLabel(session: AgentSession): string {
+  if (session.agent === 'devin' && session.status === 'needs_input') {
+    const approvals = session.approvals ?? (session.approval ? [session.approval] : []);
+    if (!approvals.length) return 'Waiting on you';
+  }
+  return statusLabels[session.status];
+}
+
 type NativeViewTransition = { finished: Promise<void> };
 type ViewTransitionDocument = Document & {
   startViewTransition?: (callback: () => void) => NativeViewTransition;
@@ -275,7 +283,7 @@ export function AgentHub() {
       if (!alerts.length && previous !== 'needs_input' && session.status === 'needs_input') {
         alerts.push({
           id: localNotificationId(`session:${session.id}`),
-          title: `${agentLabels[session.agent]} needs you`,
+          title: session.agent === 'devin' ? 'Devin is waiting on you' : `${agentLabels[session.agent]} needs you`,
           body: session.lastMessage ? previewText(session.lastMessage).slice(0, 120) : session.title,
         });
       }
@@ -678,6 +686,9 @@ function DeckCard({
         <time>{relativeTime(approval?.requestedAt ?? item.session.updatedAt)}</time>
       </div>
       <h2 className="deck-title">{item.session.title}</h2>
+      {item.kind === 'input' && (
+        <span className={`status ${item.session.status}`}>{statusLabel(item.session)}</span>
+      )}
       {approval ? (
         questions.length > 0
           ? <p className="deck-question">{questions[0]?.question}</p>
@@ -747,7 +758,7 @@ function AgentTile({
         <Avatar agent={session.agent} viewTransitionName={shared ? sharedTransitionName('av', session.id) : undefined} />
         <span className="tile-agent"><strong className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</strong>{session.project && <> · {session.project}</>}</span>
         <span className={`status ${session.status}`}>
-          {statusLabels[session.status]}
+          {statusLabel(session)}
         </span>
       </span>
       <span className="tile-title" style={shared ? { viewTransitionName: sharedTransitionName('title', session.id) } : undefined}>{session.title}</span>
@@ -989,7 +1000,7 @@ function Row({
       <span className="row-body">
         <span className="row-top">
           <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
-          <span className={`status ${session.status}`}>{statusLabels[session.status]}</span>
+          <span className={`status ${session.status}`}>{statusLabel(session)}</span>
           <span className="row-time">{relativeTime(session.updatedAt)}</span>
         </span>
         <span className="row-title" style={shared ? { viewTransitionName: sharedTransitionName('title', session.id) } : undefined}>{session.title}</span>
@@ -1123,7 +1134,7 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
           <strong style={{ viewTransitionName: sharedTransitionName('title', session.id) }}>{session.title}</strong>
           <span>
             <span className={`agent-name ${session.agent}`}>{agentLabels[session.agent]}</span>
-            <span className={`dot ${session.status}`} />{statusLabels[session.status]}
+            <span className={`dot ${session.status}`} />{statusLabel(session)}
             {session.project && <> · {session.project}</>}
           </span>
         </div>
