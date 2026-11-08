@@ -4,7 +4,8 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
-import { ChatView, FinishedGroupHeader, statusLabel } from './AgentHub';
+import type { QueueItem } from '../home';
+import { ChatView, DeckCard, FinishedGroupHeader, statusLabel } from './AgentHub';
 
 let root: Root | undefined;
 
@@ -75,6 +76,68 @@ describe('finished group header', () => {
     expect(toggle?.textContent).toBe('3 finished or idleShow');
     await act(async () => toggle?.click());
     expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Devin deck link', () => {
+  it('renders only for Devin input cards with a URL and does not bubble card gestures', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const session = (agent: AgentSession['agent'], id: string, url?: string): AgentSession => ({
+      id: `${agent}:${id}`,
+      agent,
+      nativeId: id,
+      title: `${agent} session`,
+      status: 'needs_input',
+      canReply: true,
+      updatedAt: new Date().toISOString(),
+      machine: 'desktop',
+      ...(url ? { url } : {}),
+    });
+    const onOpen = vi.fn();
+    const onDecide = vi.fn();
+    const onPointerDown = vi.fn();
+    const onClick = vi.fn();
+    const sessions = [
+      session('devin', 'with-url', 'https://devin.ai/sessions/with-url'),
+      session('claude-code', 'claude-with-url', 'https://example.com/claude'),
+      session('devin', 'without-url'),
+    ];
+    const container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(createElement('div', { onPointerDown, onClick },
+        ...sessions.map((itemSession) => {
+          const item: QueueItem = { kind: 'input', session: itemSession };
+          return createElement(DeckCard, {
+            key: itemSession.id,
+            item,
+            depth: 0,
+            onOpen,
+            onDecide,
+          });
+        }),
+      ));
+    });
+
+    const cards = container.querySelectorAll('.deck-card');
+    const devinLink = cards[0]?.querySelector<HTMLAnchorElement>('.deck-open-in');
+    expect(devinLink?.textContent).toContain('Open in Devin');
+    expect(devinLink?.getAttribute('href')).toBe('https://devin.ai/sessions/with-url');
+    expect(devinLink?.target).toBe('_blank');
+    expect(devinLink?.rel).toBe('noreferrer');
+    expect(cards[1]?.querySelector('.deck-open-in')).toBeNull();
+    expect(cards[2]?.querySelector('.deck-open-in')).toBeNull();
+
+    await act(async () => {
+      devinLink?.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      devinLink?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    expect(onPointerDown).not.toHaveBeenCalled();
+    expect(onClick).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(onDecide).not.toHaveBeenCalled();
   });
 });
 

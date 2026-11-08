@@ -632,7 +632,7 @@ function ApprovalDeck({
   );
 }
 
-function DeckCard({
+export function DeckCard({
   item,
   depth,
   error,
@@ -697,7 +697,7 @@ function DeckCard({
       transition={{ type: 'spring', stiffness: 420, damping: 36 }}
       style={{ x, rotate, zIndex: 10 - depth }}
       onPointerDownCapture={(event) => {
-        if (event.target instanceof Element && event.target.closest('button')) event.stopPropagation();
+        if (event.target instanceof Element && event.target.closest('button, a')) event.stopPropagation();
       }}
       onDragEnd={(_, info) => endDrag(info)}
     >
@@ -723,7 +723,23 @@ function DeckCard({
           )
       ) : <p className="deck-input">{preview}</p>}
       {error && <div className="alert small">{error}</div>}
-      {approval && questions.length === 0 ? (
+      {!approval && item.kind === 'input' && item.session.agent === 'devin' && item.session.url ? (
+        <div className="deck-input-actions">
+          <button className="deck-primary" onClick={(event) => {
+            const source = event.currentTarget.closest<HTMLElement>('.deck-card');
+            if (source) onOpen(source);
+          }}>Reply</button>
+          <a
+            className="secondary deck-open-in"
+            href={item.session.url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            Open in Devin <ExternalLink size={16} />
+          </a>
+        </div>
+      ) : approval && questions.length === 0 ? (
         <>
           <div className="deck-actions">
             <button className="deck-deny" onClick={() => void flyOut('deny')}>Deny</button>
