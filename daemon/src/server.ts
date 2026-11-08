@@ -73,7 +73,6 @@ export function createHub(
   const devinV3 = config.devinPat && config.devinOrgId
     ? { pat: config.devinPat, orgId: config.devinOrgId }
     : undefined;
-  const devinApiKey = config.devinApiKey ?? devinV3?.pat;
   const codex = new CodexCollector(config.lookbackDays, approvalHoldMs);
   const claude = new ClaudeCollector({ days: config.lookbackDays, approvalHoldMs });
   const collectors: Collector[] = options.collectors || [
@@ -81,7 +80,7 @@ export function createHub(
     claude,
     new AntigravityCollector(config.lookbackDays),
     new DevinLocalCollector(),
-    ...(devinApiKey ? [new DevinCollector(devinApiKey, undefined, devinV3)] : []),
+    ...(config.devinApiKey || devinV3 ? [new DevinCollector(config.devinApiKey, undefined, devinV3)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];
   const replyRunner = options.replyRunner ?? (config.localReplies?.enabled === false ? undefined : new LocalReplyRunner({
@@ -123,7 +122,7 @@ export function createHub(
       canReply: session.agent === 'devin'
         ? isLocalDevin
           ? Boolean(replyRunner?.canReplyTo?.(session))
-          : Boolean(collectorForSession(session)?.sendMessage)
+          : Boolean(session.canReply && collectorForSession(session)?.sendMessage)
         : isReplyAgent(session.agent) && Boolean(
           replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
         ),
@@ -219,7 +218,7 @@ export function createHub(
     }
     const collector = collectorForSession(session);
     const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
-    const isDevinReply = session.agent === 'devin' && !isLocalDevin && Boolean(collector?.sendMessage);
+    const isDevinReply = session.agent === 'devin' && !isLocalDevin && Boolean(session.canReply && collector?.sendMessage);
     const isLocalReply = isReplyAgent(session.agent)
       && (session.agent !== 'devin' || isLocalDevin)
       && Boolean(

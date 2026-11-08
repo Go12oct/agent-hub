@@ -81,7 +81,7 @@ export class DevinCollector implements Collector {
   private messagesById = new Map<string, CachedDevinMessages>();
   private sessions = new Map<string, AgentSession>();
   constructor(
-    private apiKey: string,
+    private apiKey: string | undefined,
     private fetcher: typeof fetch = fetch,
     private v3?: { pat: string; orgId: string },
   ) {}
@@ -92,6 +92,7 @@ export class DevinCollector implements Collector {
   }
   stop(): void { if (this.timer) clearInterval(this.timer); }
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
+    if (!this.apiKey) return [];
     const id = `devin:${nativeId}`;
     const updatedAt = this.sessions.get(id)?.updatedAt || '';
     const cached = this.messagesById.get(nativeId);
@@ -117,6 +118,7 @@ export class DevinCollector implements Collector {
     } catch { return []; }
   }
   async sendMessage(nativeId: string, text: string): Promise<void> {
+    if (!this.apiKey) throw new Error('Replying to Devin cloud chats needs devinApiKey');
     const response = await this.fetcher(`https://api.devin.ai/v1/sessions/${encodeURIComponent(nativeId)}/message`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
@@ -144,7 +146,7 @@ export class DevinCollector implements Collector {
           if (typeof data.end_cursor !== 'string' || !data.end_cursor) throw new Error('Invalid v3 sessions cursor');
           after = data.end_cursor;
         }
-      } else {
+      } else if (this.apiKey) {
         for (let page = 0; page < 10; page++) {
           const offset = page * 100;
           const response = await this.fetcher(`https://api.devin.ai/v1/sessions?limit=100&offset=${offset}`, {
@@ -189,7 +191,7 @@ export class DevinCollector implements Collector {
           ...(lastMessage
             ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
             : {}),
-          canReply: true,
+          canReply: Boolean(this.apiKey),
           updatedAt, ...(createdAt ? { startedAt: createdAt } : {}),
           url: this.v3 && typeof row.url === 'string'
             ? row.url

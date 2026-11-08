@@ -987,6 +987,40 @@ describe('Devin API mapping', () => {
     }
   });
 
+  it('keeps PAT-only Devin sessions read-only without v1 requests', async () => {
+    const requests: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+      const url = String(input);
+      requests.push(url);
+      return new Response(JSON.stringify({
+        items: [{
+          session_id: 'devin-pat-only',
+          title: 'PAT-only session',
+          status: 'running',
+          status_detail: 'working',
+        }],
+        end_cursor: null,
+        has_next_page: false,
+        total: 1,
+      }));
+    };
+    const collector = new DevinCollector(undefined, fetcher, { pat: 'fake-pat', orgId: 'org-123' });
+    const emitted: AgentSession[] = [];
+    collector.start((session) => emitted.push(session));
+    try {
+      await vi.waitFor(() => expect(emitted).toHaveLength(1));
+      expect(emitted[0]).toMatchObject({ id: 'devin:devin-pat-only', canReply: false });
+      expect(await collector.getMessages(emitted[0]!.nativeId, 10)).toEqual([]);
+      await expect(collector.sendMessage(emitted[0]!.nativeId, 'Reply'))
+        .rejects.toThrow('Replying to Devin cloud chats needs devinApiKey');
+      expect(requests).toEqual([
+        'https://api.devin.ai/v3/organizations/org-123/sessions?first=100',
+      ]);
+    } finally {
+      collector.stop();
+    }
+  });
+
   it('fetches all session pages up to 101 rows', async () => {
     const urls: string[] = [];
     const fetcher: typeof fetch = async (input) => {

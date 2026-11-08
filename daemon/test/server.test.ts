@@ -91,7 +91,17 @@ describe('authenticated HTTP API', () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher: typeof fetch = async (input, init) => {
       requests.push({ url: String(input), init });
-      return new Response(JSON.stringify({ items: [], end_cursor: null, has_next_page: false, total: 0 }));
+      return new Response(JSON.stringify({
+        items: [{
+          session_id: 'devin-abc123',
+          title: 'PAT-only session',
+          status: 'running',
+          status_detail: 'working',
+        }],
+        end_cursor: null,
+        has_next_page: false,
+        total: 1,
+      }));
     };
     vi.stubGlobal('fetch', fetcher);
     const runtime = createHub({
@@ -104,6 +114,26 @@ describe('authenticated HTTP API', () => {
       await vi.waitFor(() => expect(requests).toHaveLength(1));
       expect(requests[0]?.url).toBe('https://api.devin.ai/v3/organizations/org-123/sessions?first=100');
       expect(requests[0]?.init?.headers).toMatchObject({ Authorization: 'Bearer fake-pat' });
+      await vi.waitFor(async () => {
+        const response = await runtime.app.inject({
+          url: '/api/sessions',
+          headers: { authorization: 'Bearer test-token' },
+        });
+        expect(response.json()).toContainEqual(expect.objectContaining({
+          id: 'devin:devin-abc123',
+          canReply: false,
+        }));
+      });
+      const reply = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/devin:devin-abc123/messages',
+        headers: { authorization: 'Bearer test-token' },
+        payload: { text: 'Reply' },
+      });
+      expect(reply.statusCode).toBe(405);
+      expect(requests.map((request) => request.url)).toEqual([
+        'https://api.devin.ai/v3/organizations/org-123/sessions?first=100',
+      ]);
     } finally {
       await runtime.close();
       vi.unstubAllGlobals();
