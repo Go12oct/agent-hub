@@ -1,9 +1,15 @@
 {
   "name": "agent-hub",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "private": true,
-  "workspaces": ["packages/shared", "daemon", "app"],
-  "engines": { "node": ">=22" },
+  "workspaces": [
+    "packages/shared",
+    "daemon",
+    "app"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p daemon/tsconfig.json && tsc --noEmit -p app/tsconfig.json",
     "test": "vitest run",
@@ -13,6 +19,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^7.2.0",
+    "@capacitor/app": "^7.1.2",
     "@capacitor/barcode-scanner": "^2.0.0",
     "@capacitor/core": "^7.2.0",
     "@capacitor/local-notifications": "^7.0.1",

@@ -79,8 +79,8 @@ export function inferStatus(
 ): SessionStatus {
   if (errored) return 'error';
   const age = now - Date.parse(updatedAt);
-  if (age < 90_000 && !(lastRole === 'assistant' && completed)) return 'working';
-  if (lastRole === 'assistant' && completed && age < 6 * 60 * 60 * 1000) return 'needs_input';
+  if (age < 90_000 && !completed) return 'working';
+  if (completed) return 'done';
   return 'idle';
 }
 
@@ -101,6 +101,7 @@ export function buildSession(input: {
     ...input,
     id: `${input.agent}:${input.nativeId}`,
     title: input.title || `${input.agent} session`,
+    canReply: input.agent === 'devin',
     project: projectName(input.cwd),
     machine: os.hostname(),
   };

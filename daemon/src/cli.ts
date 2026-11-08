@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { cp, mkdir, copyFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { cp, mkdir, copyFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isSea } from 'node:sea';
 import qrcode from 'qrcode-terminal';
+import { format } from 'node:util';
 import { loadConfig, setConfigValue, configDirectory } from './config.js';
 import { installClaudeHooks, uninstallClaudeHooks } from './claude-hooks.js';
+import { installCodexHooks, uninstallCodexHooks } from './codex-hooks.js';
+import { runHookBridge } from './hook-bridge.js';
+import { firewallRuleScript } from './firewall.js';
 import { lanUrls, startServer } from './server.js';
-import { installWindowsService, isDaemonHealthy, uninstallWindowsService } from './windows-service.js';
+import { installWindowsService, isDaemonHealthy, requestDaemonShutdown, uninstallWindowsService } from './windows-service.js';
 
 function runProcess(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -19,9 +23,53 @@ function runProcess(command: string, args: string[]): Promise<void> {
   });
 }
 
+async function addWindowsFirewallRule(port: number): Promise<void> {
+  const encodedCommand = Buffer.from(firewallRuleScript(port), 'utf16le').toString('base64');
+  await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCommand]);
+}
+
+async function enableFileLogging(): Promise<void> {
+  const logPath = process.env.AGENT_HUB_LOG || (process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'agent-hub', 'agent-hub.log')
+    : undefined);
+  if (!logPath) return;
+  await mkdir(path.dirname(logPath), { recursive: true });
+  try {
+    const existingLog = await stat(logPath);
+    if (existingLog.isFile() && existingLog.size > 5 * 1024 * 1024) {
+      const previousLogPath = `${logPath}.1`;
+      await rm(previousLogPath, { force: true });
+      await rename(logPath, previousLogPath);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const stream = createWriteStream(logPath, { flags: 'a' });
+  const original = {
+    log: console.log.bind(console) as (...args: unknown[]) => void,
+    warn: console.warn.bind(console) as (...args: unknown[]) => void,
+    error: console.error.bind(console) as (...args: unknown[]) => void,
+  };
+  stream.on('error', (error) => original.error(`Agent Hub log write failed: ${error.message}`));
+  for (const level of ['log', 'warn', 'error'] as const) {
+    console[level] = (...args: unknown[]) => {
+      original[level](...args);
+      stream.write(`${new Date().toISOString()} ${format(...args as any[])}\n`);
+    };
+  }
+}
+
 async function run(): Promise<void> {
+  if (isSea()) {
+    const bridgeIndex = process.argv.findIndex((argument) => path.basename(argument).toLowerCase() === 'hook-bridge.cjs');
+    if (bridgeIndex >= 0 && process.argv[bridgeIndex + 1] === 'codex') {
+      await runHookBridge('codex');
+      return;
+    }
+  }
   const [command = 'start', ...args] = process.argv.slice(2);
   if (command === 'start') {
+    await enableFileLogging();
     const config = await loadConfig();
     const runtime = await startServer(config);
     const close = async () => { await runtime.close(); process.exit(0); };
@@ -29,17 +77,38 @@ async function run(): Promise<void> {
     process.once('SIGTERM', () => void close());
   } else if (command === 'pair') {
     const config = await loadConfig();
-    const addresses = new Set(lanUrls(config.port));
-    for (const list of Object.values(os.networkInterfaces())) {
-      for (const address of list || []) {
-        if (address.family === 'IPv4' && /^100\./.test(address.address)) addresses.add(`http://${address.address}:${config.port}`);
-      }
+    const candidates = lanUrls(config.port);
+    const urlOption = args.indexOf('--url');
+    const overrideValue = urlOption >= 0 ? args[urlOption + 1] : undefined;
+    if (urlOption >= 0 && (!overrideValue || overrideValue.startsWith('--'))) {
+      throw new Error('Usage: agent-hub pair [--url <url>]');
     }
-    const urls = [...addresses];
-    console.log('Agent Hub pairing URLs:');
-    urls.forEach((url) => console.log(`  ${url}`));
-    const pairing = `agenthub://pair?url=${encodeURIComponent(urls[0] || `http://127.0.0.1:${config.port}`)}&token=${encodeURIComponent(config.token)}`;
+    let overrideUrl: string | undefined;
+    if (overrideValue) {
+      const parsed = new URL(overrideValue);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('The --url value must use http or https.');
+      overrideUrl = parsed.origin;
+    }
+    const chosenUrl = overrideUrl || candidates[0] || `http://127.0.0.1:${config.port}`;
+    const displayedUrls = [chosenUrl, ...candidates.filter((url) => url !== chosenUrl)];
+    console.log('Agent Hub pairing URLs (the phone tries them in this order):');
+    displayedUrls.forEach((url) => console.log(`  ${url}${url === chosenUrl ? ' (first)' : ''}`));
+    console.log("If the phone can't connect, put another URL first with: agent-hub pair --url http://<ip>:4747");
+    const pairing = `agenthub://pair?${displayedUrls.map((url) => `url=${encodeURIComponent(url)}`).join('&')}&token=${encodeURIComponent(config.token)}`;
     qrcode.generate(pairing, { small: true });
+  } else if (command === 'firewall') {
+    if (process.platform !== 'win32') {
+      console.log('The Agent Hub firewall rule can only be configured on Windows.');
+      return;
+    }
+    const port = (await loadConfig()).port;
+    try {
+      await addWindowsFirewallRule(port);
+      console.log(`Windows Firewall allows Agent Hub on TCP port ${port}.`);
+    } catch {
+      console.warn('Could not add the Windows Firewall rule. Approve the UAC prompt or run agent-hub firewall as administrator.');
+      process.exitCode = 1;
+    }
   } else if (command === 'config' && args[0] === 'set' && args[1] && args[2] !== undefined) {
     await setConfigValue(args[1], args.slice(2).join(' '));
     console.log(`Updated ${args[1]}`);
@@ -49,6 +118,16 @@ async function run(): Promise<void> {
   } else if (command === 'uninstall-claude-hooks') {
     await uninstallClaudeHooks();
     console.log('Removed Agent Hub Claude Code hooks.');
+  } else if (command === 'install-codex-hooks') {
+    const installed = await installCodexHooks();
+    console.log(installed
+      ? 'Installed Codex hooks. Open Codex and run /hooks once to trust them.'
+      : 'Codex config directory not found; skipping Codex hooks.');
+  } else if (command === 'hook-bridge') {
+    await runHookBridge(args[0] || '');
+  } else if (command === 'uninstall-codex-hooks') {
+    await uninstallCodexHooks();
+    console.log('Removed Agent Hub Codex hooks.');
   } else if (command === 'install-service') {
     if (process.platform !== 'win32') {
       console.log('On Windows, run agent-hub install-service to register the AgentHub Scheduled Task.');
@@ -79,8 +158,18 @@ async function run(): Promise<void> {
     }
     const runtime = isStandalone ? destination : executable;
     const launcher = path.join(installDir, 'start-hidden.vbs');
+    const trayScript = path.join(installDir, 'tray.ps1');
     const quoteVbs = (value: string) => `"${value.replaceAll('"', '""')}"`;
-    await writeFile(launcher, `CreateObject("Wscript.Shell").Run ${quoteVbs(`${quoteVbs(runtime)} ${isStandalone ? 'start' : `${quoteVbs(destination)} start`}`)}, 0, False\r\n`);
+    const daemonCommand = `${quoteVbs(runtime)} ${isStandalone ? 'start' : `${quoteVbs(destination)} start`}`;
+    const launcherLines = [
+      'Set shell = CreateObject("Wscript.Shell")',
+      `shell.Run ${quoteVbs(daemonCommand)}, 0, False`,
+    ];
+    if (existsSync(trayScript)) {
+      const trayCommand = `powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ${quoteVbs(trayScript)}`;
+      launcherLines.push(`shell.Run ${quoteVbs(trayCommand)}, 0, False`);
+    }
+    await writeFile(launcher, `${launcherLines.join('\r\n')}\r\n`);
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
     const startupDirectory = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
     const config = await loadConfig();
@@ -90,6 +179,7 @@ async function run(): Promise<void> {
       port: config.port,
       runProcess,
       isHealthy: isDaemonHealthy,
+      stopRunning: (port) => requestDaemonShutdown(port, config.token),
       startDetached: (command, childArgs) => {
         const child = spawn(command, childArgs, { detached: true, stdio: 'ignore', windowsHide: true });
         child.once('error', (error) => console.error(`Could not start Agent Hub: ${(error as Error).message}`));
@@ -107,7 +197,7 @@ async function run(): Promise<void> {
     }
   } else {
     console.log(`Agent Hub CLI
-Usage: agent-hub [start|pair|install-claude-hooks|uninstall-claude-hooks|install-service|uninstall-service|config set <key> <value>]
+Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-codex-hooks|uninstall-codex-hooks|hook-bridge codex|install-service|uninstall-service|config set <key> <value>]
 Config directory: ${configDirectory()}`);
   }
 }

@@ -2,6 +2,21 @@ export type AgentKind = 'devin' | 'codex' | 'codex-cloud' | 'claude-code' | 'ant
 export type SessionStatus = 'working' | 'needs_input' | 'idle' | 'done' | 'error';
 export type MessageRole = 'user' | 'assistant' | 'tool';
 
+export interface PendingApproval {
+  id: string;
+  toolName: string;
+  summary: string;
+  detail?: string;
+  readOnly?: boolean;
+  questions?: Array<{
+    question: string;
+    header?: string;
+    multiSelect?: boolean;
+    options: Array<{ label: string; description?: string }>;
+  }>;
+  requestedAt: string;
+}
+
 export interface AgentSession {
   id: string;
   agent: AgentKind;
@@ -11,6 +26,11 @@ export interface AgentSession {
   cwd?: string;
   branch?: string;
   status: SessionStatus;
+  canReply: boolean;
+  replyRunning?: boolean;
+  replyError?: string;
+  approval?: PendingApproval;
+  approvals?: PendingApproval[];
   lastMessage?: string;
   lastRole?: MessageRole;
   startedAt?: string;

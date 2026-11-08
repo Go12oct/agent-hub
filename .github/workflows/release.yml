@@ -4,20 +4,33 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux
-          - os: windows-latest
-            artifact: windows
-    runs-on: ${{ matrix.os }}
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            prerelease=()
+            if [[ "$TAG" == *-* ]]; then
+              prerelease+=(--prerelease)
+            fi
+            gh release create "$TAG" --title "Agent Hub $TAG" --generate-notes --draft "${prerelease[@]}"
+          fi
+
+  windows:
+    needs: create-release
+    runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,20 +40,51 @@ jobs:
       - run: npm ci
       - run: npm run build:web
       - run: npm run build:daemon
-      - if: runner.os == 'Windows'
+      - name: Build Windows executable
         continue-on-error: true
         run: node daemon/scripts/build-sea.mjs
-      - uses: actions/upload-artifact@v4
-        with:
-          name: daemon-${{ matrix.artifact }}
-          path: |
-            daemon/dist/agent-hub.cjs
-            daemon/dist/agent-hub.exe
-            daemon/public/
-          if-no-files-found: ignore
+      - name: Assemble Windows package
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'agent-hub'
+          $dist = Join-Path $packageRoot 'daemon\dist'
+          $public = Join-Path $packageRoot 'daemon\public'
+          New-Item -ItemType Directory -Force -Path $dist, $public | Out-Null
+          Copy-Item 'daemon/dist/agent-hub.cjs' $dist -Force
+          Copy-Item 'daemon/dist/hook-bridge.cjs' $dist -Force
+          Copy-Item 'daemon/public/*' $public -Recurse -Force
+          if (Test-Path 'daemon/dist/agent-hub.exe') {
+            Copy-Item 'daemon/dist/agent-hub.exe' $dist -Force
+          }
+          Copy-Item 'scripts/install.ps1' $packageRoot -Force
+          Copy-Item 'scripts/uninstall.ps1' $packageRoot -Force
+          Copy-Item 'scripts/tray.ps1' $packageRoot -Force
+          Copy-Item 'scripts/Install-AgentHub.cmd' $packageRoot -Force
+          Copy-Item 'scripts/Uninstall-AgentHub.cmd' $packageRoot -Force
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'agent-hub-windows.zip'
+          Compress-Archive -Path $packageRoot -DestinationPath $zipPath -Force
+      - name: Upload Windows assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $assets = @(
+            'agent-hub-windows.zip',
+            'daemon/dist/agent-hub.cjs',
+            'daemon/dist/hook-bridge.cjs',
+            'scripts/install.ps1'
+          )
+          if (Test-Path 'daemon/dist/agent-hub.exe') {
+            $assets += 'daemon/dist/agent-hub.exe'
+          }
+          gh release upload "$env:TAG" @assets --clobber
 
   android:
+    needs: create-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,41 +102,41 @@ jobs:
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - run: npm run build:web
       - run: npx cap sync android
-      - run: ./gradlew assembleDebug
+      - name: Build signed release APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" ]]; then
+            echo "::error::Repository secret ANDROID_KEYSTORE_BASE64 is required to publish a release APK."
+            exit 1
+          fi
+          if [[ -z "$ANDROID_KEYSTORE_PASSWORD" ]]; then
+            echo "::error::Repository secret ANDROID_KEYSTORE_PASSWORD is required to publish a release APK."
+            exit 1
+          fi
+          keystore_path="$RUNNER_TEMP/agent-hub-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          AGENT_HUB_KEYSTORE="$keystore_path" \
+          AGENT_HUB_KEYSTORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD" \
+            ./gradlew assembleRelease
         working-directory: android
-      - uses: actions/upload-artifact@v4
-        with:
-          name: android-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk agent-hub-android.apk
+          gh release upload "$TAG" agent-hub-android.apk --clobber
 
   publish:
-    needs: [build, android]
+    needs: [windows, android]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-      - name: Assemble Windows package
-        run: |
-          mkdir -p agent-hub/daemon/dist agent-hub/daemon/public agent-hub/scripts
-          cp release-assets/daemon-windows/dist/agent-hub.cjs agent-hub/daemon/dist/
-          cp -R release-assets/daemon-windows/public/. agent-hub/daemon/public/
-          if [ -f release-assets/daemon-windows/dist/agent-hub.exe ]; then
-            cp release-assets/daemon-windows/dist/agent-hub.exe agent-hub/daemon/dist/
-            cp release-assets/daemon-windows/dist/agent-hub.exe release-assets/agent-hub.exe
-          fi
-          cp scripts/install.ps1 agent-hub/scripts/
-          cp scripts/install.ps1 release-assets/install.ps1
-          cp release-assets/daemon-windows/dist/agent-hub.cjs release-assets/agent-hub.cjs
-          cp release-assets/android-apk/app-debug.apk release-assets/agent-hub-android-debug.apk
-          zip -qr agent-hub-windows.zip agent-hub
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            agent-hub-windows.zip
-            release-assets/agent-hub.cjs
-            release-assets/agent-hub.exe
-            release-assets/agent-hub-android-debug.apk
-            release-assets/install.ps1
-          fail_on_unmatched_files: false
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

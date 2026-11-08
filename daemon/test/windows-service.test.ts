@@ -86,6 +86,56 @@ describe('Windows service installation', () => {
     expect(startDetached).not.toHaveBeenCalled();
   });
 
+  it('stops a running daemon and starts the new one when a shutdown hook is provided', async () => {
+    const root = await createTempDirectory();
+    const launcher = path.join(root, 'start-hidden.vbs');
+    await writeFile(launcher, 'launcher');
+    const startupDirectory = path.join(root, 'Startup');
+    let healthy = true;
+    const stopRunning = vi.fn(async () => { healthy = false; });
+    const startDetached = vi.fn();
+    const log = vi.fn();
+
+    await installWindowsService({
+      launcher,
+      startupDirectory,
+      port: 4747,
+      runProcess: vi.fn(async () => { throw new Error('Access is denied.'); }),
+      isHealthy: async () => healthy,
+      stopRunning,
+      startDetached,
+      log,
+    });
+
+    expect(stopRunning).toHaveBeenCalledWith(4747);
+    expect(startDetached).toHaveBeenCalledWith('wscript.exe', [path.join(startupDirectory, 'AgentHub.vbs')]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Stopping the running Agent Hub'));
+  });
+
+  it('leaves a daemon that refuses to stop in place', async () => {
+    vi.useFakeTimers();
+    try {
+      const startDetached = vi.fn();
+      const log = vi.fn();
+      const pending = installWindowsService({
+        launcher: 'C:\\Agent Hub\\start-hidden.vbs',
+        startupDirectory: 'C:\\Startup',
+        port: 4747,
+        runProcess: vi.fn(async () => {}),
+        isHealthy: async () => true,
+        stopRunning: async () => {},
+        startDetached,
+        log,
+      });
+      await vi.advanceTimersByTimeAsync(11_000);
+      await pending;
+      expect(startDetached).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('did not stop'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ignores scheduled-task deletion failures and removes the Startup launcher', async () => {
     const root = await createTempDirectory();
     const startupDirectory = path.join(root, 'Startup');
