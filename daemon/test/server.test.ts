@@ -49,6 +49,7 @@ class FakeLocalReplyRunner implements ReplyRunner {
       : session.agent === 'codex' && this.supports('codex');
   }
   isRunning(sessionId: string): boolean { return this.running.has(sessionId); }
+  canStop(sessionId: string): boolean { return this.running.has(sessionId); }
   stop(sessionId: string): boolean { return this.running.delete(sessionId); }
   failure(sessionId: string): { error: string; at: string } | undefined { return this.failures.get(sessionId); }
   async send(session: AgentSession, text: string): Promise<void> {
@@ -520,6 +521,34 @@ describe('authenticated HTTP API', () => {
       expect(response.json()).toEqual({
         error: 'Claude is still working on this chat in the background. Send again when it finishes.',
       });
+    } finally { await runtime.close(); }
+  });
+
+  it('presents background Claude work as working without advertising Stop', async () => {
+    const collector = new FakeCollector();
+    const replyRunner: ReplyRunner = {
+      supports: (agent) => agent === 'claude-code',
+      isRunning: () => true,
+      canStop: () => false,
+      failure: () => undefined,
+      send: async () => {},
+    };
+    const runtime = createHub(config, {
+      collectors: [collector],
+      replyRunner,
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.({ ...testSession('claude-code', 'background-session'), status: 'done' });
+    try {
+      const sessions = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(sessions.json()[0]).toMatchObject({
+        id: 'claude-code:background-session',
+        status: 'working',
+      });
+      expect(sessions.json()[0]).not.toHaveProperty('replyRunning');
     } finally { await runtime.close(); }
   });
 

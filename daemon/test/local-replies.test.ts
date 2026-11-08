@@ -443,6 +443,7 @@ describe('LocalReplyRunner', () => {
     const first = runner.send(claude, text);
     await vi.waitFor(() => expect(releaseInitial).toBeTypeOf('function'));
     expect(runner.isRunning(claude.id)).toBe(true);
+    expect(runner.canStop(claude.id)).toBe(false);
     await expect(runner.send(claude, 'Another message')).rejects.toBeInstanceOf(ReplyBusyError);
     releaseInitial!({
       stdout: JSON.stringify([{ id: 'short-id', sessionId: claude.nativeId, status: 'idle' }]),

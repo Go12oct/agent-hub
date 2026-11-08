@@ -116,7 +116,8 @@ export function createHub(
     const pending = approvals.pending(session.id);
     const approval = pending[0];
     const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
-    const replyRunning = Boolean(replyRunner?.isRunning(session.id));
+    const isReplyRunning = Boolean(replyRunner?.isRunning(session.id));
+    const replyRunning = Boolean(replyRunner?.canStop?.(session.id));
     const presentedSession = { ...session };
     delete presentedSession.replyRunning;
     return {
@@ -131,7 +132,7 @@ export function createHub(
         ),
       ...(replyRunning ? { replyRunning: true } : {}),
       replyError: failure && Date.parse(failure.at) >= Date.parse(session.updatedAt) ? failure.error : undefined,
-      ...(approval ? {} : { status: replyRunning ? 'working' as const : session.status }),
+      ...(approval ? {} : { status: isReplyRunning ? 'working' as const : session.status }),
     };
   };
   const broadcast = (session: AgentSession) => {

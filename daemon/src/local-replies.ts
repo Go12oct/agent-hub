@@ -28,6 +28,7 @@ export interface ReplyRunner {
   supports(agent: ReplyAgent): boolean;
   canReplyTo?(session: AgentSession): boolean;
   isRunning(sessionId: string): boolean;
+  canStop?(sessionId: string): boolean;
   stop?(sessionId: string): boolean;
   failure(sessionId: string): ReplyFailure | undefined;
   send(session: AgentSession, text: string): Promise<void>;
@@ -366,6 +367,10 @@ export class LocalReplyRunner implements ReplyRunner {
 
   isRunning(sessionId: string): boolean {
     return this.active.has(sessionId) || this.backgroundInFlight.has(sessionId);
+  }
+
+  canStop(sessionId: string): boolean {
+    return this.active.has(sessionId);
   }
 
   stop(sessionId: string): boolean {
