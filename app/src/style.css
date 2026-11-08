@@ -195,6 +195,7 @@ a { color: var(--accent); }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .composer { padding: 8px 12px calc(var(--bottom) + 12px); background: linear-gradient(to top, var(--bg) 70%, transparent); }
 .composer-box { display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 18px; border: 1px solid var(--line-strong); border-radius: 26px; background: var(--surface-2); box-shadow: 0 10px 30px -12px rgba(0, 0, 0, .7); }
+.composer .secondary.danger { width: 100%; min-height: 44px; margin-top: 8px; border: 1px solid var(--line-strong); color: var(--error); }
 .composer textarea { flex: 1; min-width: 0; max-height: 140px; padding: 9px 0; border: 0; outline: none; background: transparent; resize: none; font-size: 16px; line-height: 1.4; }
 .send { display: grid; width: 38px; height: 38px; flex: 0 0 38px; place-items: center; border-radius: 50%; background: var(--text); color: #111; transition: transform .12s; }
 .send:active { transform: scale(.92); }

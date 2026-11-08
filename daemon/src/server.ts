@@ -116,8 +116,11 @@ export function createHub(
     const pending = approvals.pending(session.id);
     const approval = pending[0];
     const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
+    const replyRunning = Boolean(replyRunner?.isRunning(session.id));
+    const presentedSession = { ...session };
+    delete presentedSession.replyRunning;
     return {
-      ...session,
+      ...presentedSession,
       ...(approval ? { approval, approvals: pending, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
       canReply: session.agent === 'devin'
         ? isLocalDevin
@@ -126,8 +129,9 @@ export function createHub(
         : isReplyAgent(session.agent) && Boolean(
           replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
         ),
+      ...(replyRunning ? { replyRunning: true } : {}),
       replyError: failure && Date.parse(failure.at) >= Date.parse(session.updatedAt) ? failure.error : undefined,
-      ...(approval ? {} : { status: replyRunner?.isRunning(session.id) ? 'working' as const : session.status }),
+      ...(approval ? {} : { status: replyRunning ? 'working' as const : session.status }),
     };
   };
   const broadcast = (session: AgentSession) => {
@@ -201,6 +205,15 @@ export function createHub(
     const rank = (status: AgentSession['status']) => status === 'needs_input' ? 0 : status === 'working' ? 1 : 2;
     return rank(a.status) - rank(b.status) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
   }));
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/reply/stop', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    if (!replyRunner?.stop?.(session.id)) {
+      return reply.code(409).send({ error: 'Nothing is running in this chat' });
+    }
+    replyRunner.onChange?.(session.id);
+    return reply.code(200).send({ stopped: true });
+  });
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>('/api/sessions/:id/messages', async (request, reply) => {
     const id = request.params.id;
     const session = sessions.get(id);

@@ -875,6 +875,58 @@ describe('LocalReplyRunner', () => {
     });
   });
 
+  it('does not time out a Devin Local reply after 25 minutes', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const runner = new LocalReplyRunner({
+      commands: { devin: 'devin.exe' },
+      resolve: async () => undefined,
+      spawn: vi.fn(() => child) as unknown as typeof spawn,
+      startupMs: 10,
+      timeoutMs: 20,
+    });
+    await runner.init();
+
+    const sending = runner.send(devinLocalSession(), text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await sending;
+    await vi.advanceTimersByTimeAsync(25 * 60_000);
+
+    expect(runner.isRunning(devinLocalSession().id)).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(runner.failure(devinLocalSession().id)).toBeUndefined();
+    child.emit('close', 0);
+    expect(runner.isRunning(devinLocalSession().id)).toBe(false);
+  });
+
+  it('stops a Devin Local reply without recording a failure', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const localSession = devinLocalSession();
+    const runner = new LocalReplyRunner({
+      commands: { devin: 'devin.exe' },
+      resolve: async () => undefined,
+      spawn: vi.fn(() => child) as unknown as typeof spawn,
+      startupMs: 10,
+    });
+    await runner.init();
+
+    const sending = runner.send(localSession, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await sending;
+
+    expect(runner.isRunning(localSession.id)).toBe(true);
+    expect(runner.stop(localSession.id)).toBe(true);
+    expect(child.kill).toHaveBeenCalledTimes(1);
+    child.emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(runner.isRunning(localSession.id)).toBe(false);
+    expect(runner.failure(localSession.id)).toBeUndefined();
+    expect(runner.stop(localSession.id)).toBe(false);
+  });
+
   it('finalizes after exit when close does not arrive', async () => {
     vi.useFakeTimers();
     const child = fakeChild();

@@ -28,6 +28,7 @@ export interface ReplyRunner {
   supports(agent: ReplyAgent): boolean;
   canReplyTo?(session: AgentSession): boolean;
   isRunning(sessionId: string): boolean;
+  stop?(sessionId: string): boolean;
   failure(sessionId: string): ReplyFailure | undefined;
   send(session: AgentSession, text: string): Promise<void>;
 }
@@ -273,7 +274,8 @@ export async function resolveExecutable(name: string): Promise<string | undefine
 
 interface ActiveReply {
   child: ChildProcess;
-  timeout: NodeJS.Timeout;
+  timeout?: NodeJS.Timeout;
+  stopped?: boolean;
 }
 
 interface QueueReplyResult {
@@ -365,6 +367,15 @@ export class LocalReplyRunner implements ReplyRunner {
     return this.active.has(sessionId) || this.backgroundInFlight.has(sessionId);
   }
 
+  stop(sessionId: string): boolean {
+    const active = this.active.get(sessionId);
+    if (!active) return false;
+    active.stopped = true;
+    if (active.timeout) clearTimeout(active.timeout);
+    this.kill(active.child);
+    return true;
+  }
+
   failure(sessionId: string): ReplyFailure | undefined {
     return this.lastFailure.get(sessionId);
   }
@@ -433,7 +444,7 @@ export class LocalReplyRunner implements ReplyRunner {
 
     return new Promise<void>((resolve, reject) => {
       let startupTimer: NodeJS.Timeout;
-      let timeout: NodeJS.Timeout;
+      let timeout: NodeJS.Timeout | undefined;
       let forceKillTimer: NodeJS.Timeout | undefined;
       let exitGraceTimer: NodeJS.Timeout | undefined;
       let stopGraceTimer: NodeJS.Timeout | undefined;
@@ -443,12 +454,14 @@ export class LocalReplyRunner implements ReplyRunner {
         if (finished) return;
         finished = true;
         clearTimeout(startupTimer);
-        clearTimeout(timeout);
+        if (timeout) clearTimeout(timeout);
         if (forceKillTimer) clearTimeout(forceKillTimer);
         if (exitGraceTimer) clearTimeout(exitGraceTimer);
         if (stopGraceTimer) clearTimeout(stopGraceTimer);
-        if (this.active.get(session.id)?.child === runningChild) this.active.delete(session.id);
-        const failed = Boolean(error || pendingFailure) || code !== 0;
+        const active = this.active.get(session.id);
+        const stopped = active?.stopped === true;
+        if (active?.child === runningChild) this.active.delete(session.id);
+        const failed = !stopped && (Boolean(error || pendingFailure) || code !== 0);
         const rawFailureMessage = error
           ? stderrTail || error.message || `Failed to start ${agentLabels[agent]}`
           : pendingFailure || stderrTail || `${agentLabels[agent]} stopped with exit code ${code ?? 'unknown'}`;
@@ -469,8 +482,9 @@ export class LocalReplyRunner implements ReplyRunner {
 
       const finish = (code: number | null, error?: Error) => {
         if (finished || fallbackStarted) return;
-        const failed = Boolean(error || pendingFailure) || code !== 0;
-        if (agent === 'codex' && failed && /already has an active writer/i.test(stderrTail)) {
+        const stopped = this.active.get(session.id)?.stopped === true;
+        const failed = !stopped && (Boolean(error || pendingFailure) || code !== 0);
+        if (!stopped && agent === 'codex' && failed && /already has an active writer/i.test(stderrTail)) {
           fallbackStarted = true;
           const queueBinary = this.platform === 'win32'
             ? resolveCodexBinary(executable, this.fileExists)
@@ -483,7 +497,12 @@ export class LocalReplyRunner implements ReplyRunner {
           const queueCommand = buildCodexQueueCommand(session.nativeId, text, command.cwd, queueBinary);
           void this.runCodexQueue(queueCommand, (queueChild) => {
             runningChild = queueChild;
-            this.active.set(session.id, { child: queueChild, timeout });
+            const active = this.active.get(session.id);
+            this.active.set(session.id, {
+              child: queueChild,
+              ...(timeout ? { timeout } : {}),
+              ...(active?.stopped ? { stopped: true } : {}),
+            });
           }).then((result) => {
             if (result.exitCode === 0 && !result.error) {
               stderrTail = '';
@@ -506,26 +525,28 @@ export class LocalReplyRunner implements ReplyRunner {
         finalize(code, error);
       };
 
-      timeout = setTimeout(() => {
-        if (finished) return;
-        pendingFailure = 'Timed out after 20 minutes';
-        this.kill(runningChild);
-        if (!finished) {
-          forceKillTimer = setTimeout(() => {
-            if (finished) return;
-            try {
-              runningChild.kill('SIGKILL');
-            } catch {}
-            if (finished) return;
-            stopGraceTimer = setTimeout(() => {
+      if (agent !== 'devin') {
+        timeout = setTimeout(() => {
+          if (finished) return;
+          pendingFailure = 'Timed out after 20 minutes';
+          this.kill(runningChild);
+          if (!finished) {
+            forceKillTimer = setTimeout(() => {
               if (finished) return;
-              pendingFailure = `Couldn't stop ${agentLabels[agent]} after timeout`;
-              finalize(null);
-            }, 30_000);
-          }, 10_000);
-        }
-      }, this.timeoutMs);
-      this.active.set(session.id, { child, timeout });
+              try {
+                runningChild.kill('SIGKILL');
+              } catch {}
+              if (finished) return;
+              stopGraceTimer = setTimeout(() => {
+                if (finished) return;
+                pendingFailure = `Couldn't stop ${agentLabels[agent]} after timeout`;
+                finalize(null);
+              }, 30_000);
+            }, 10_000);
+          }
+        }, this.timeoutMs);
+      }
+      this.active.set(session.id, { child, ...(timeout ? { timeout } : {}) });
       this.notify(session.id);
       console.log(`Local reply started: ${session.agent} ${session.id}`);
       startupTimer = setTimeout(() => {

@@ -581,11 +581,12 @@ function groupMessages(messages: SessionMessage[]): Array<ChatItem | ToolGroup> 
   return output;
 }
 
-function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing: PairingDetails; onBack: () => void }) {
+export function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing: PairingDetails; onBack: () => void }) {
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [sendError, setSendError] = useState('');
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -647,6 +648,24 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
     } finally { setSending(false); }
   }
 
+  async function stopReply() {
+    if (stopping) return;
+    setStopping(true);
+    setSendError('');
+    try {
+      const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/reply/stop`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${pairing.token}` },
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: unknown };
+        setSendError(typeof body.error === 'string' ? body.error : 'Could not stop this reply. Try again.');
+      }
+    } catch {
+      setSendError('Could not reach your PC. Try again.');
+    } finally { setStopping(false); }
+  }
+
   const items = groupMessages(messages);
   const openLabel = session.agent === 'devin' ? 'Open in Devin' : `Open in ${agentLabels[session.agent]}`;
 
@@ -690,18 +709,26 @@ function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing
       {(session.approvals || (session.approval ? [session.approval] : [])).map((approval) => (
         <ApprovalCard key={approval.id} session={session} approval={approval} pairing={pairing} />
       ))}
-      {canReply ? (
+      {canReply || session.replyRunning ? (
         <footer className="composer">
           {(sendError || (!sending && session.replyError)) && (
             <div className="error small">{sendError || session.replyError}</div>
           )}
-          <div className="composer-box">
-            <textarea value={draft} rows={1} placeholder={`Message ${agentLabels[session.agent]}`}
-              onChange={(event) => { setDraft(event.target.value); event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`; }} />
-            <button className="send" aria-label="Send" disabled={!draft.trim() || sending} onClick={() => void send()}>
-              {sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={20} />}
+          {canReply && (
+            <div className="composer-box">
+              <textarea value={draft} rows={1} placeholder={`Message ${agentLabels[session.agent]}`}
+                onChange={(event) => { setDraft(event.target.value); event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`; }} />
+              <button className="send" aria-label="Send" disabled={!draft.trim() || sending} onClick={() => void send()}>
+                {sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={20} />}
+              </button>
+            </div>
+          )}
+          {session.replyRunning && (
+            <button className="secondary danger stop-reply" type="button" aria-label="Stop reply"
+              disabled={stopping} onClick={() => void stopReply()}>
+              {stopping ? 'Stopping…' : 'Stop'}
             </button>
-          </div>
+          )}
         </footer>
       ) : (
         <footer className="composer readonly">

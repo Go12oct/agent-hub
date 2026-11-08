@@ -26,6 +26,7 @@ export interface AgentSession {
   branch?: string;
   status: SessionStatus;
   canReply: boolean;
+  replyRunning?: boolean;
   replyError?: string;
   approval?: PendingApproval;
   approvals?: PendingApproval[];

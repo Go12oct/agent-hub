@@ -49,6 +49,7 @@ class FakeLocalReplyRunner implements ReplyRunner {
       : session.agent === 'codex' && this.supports('codex');
   }
   isRunning(sessionId: string): boolean { return this.running.has(sessionId); }
+  stop(sessionId: string): boolean { return this.running.delete(sessionId); }
   failure(sessionId: string): { error: string; at: string } | undefined { return this.failures.get(sessionId); }
   async send(session: AgentSession, text: string): Promise<void> {
     if (this.running.has(session.id)) throw new ReplyBusyError();
@@ -316,7 +317,7 @@ describe('authenticated HTTP API', () => {
     } finally { await runtime.close(); }
   });
 
-  it('presents Devin Local reply capability and routes replies through the local runner', async () => {
+  it('presents Devin Local reply capability, routes replies locally, and stops them', async () => {
     const collector = new DevinLocalReplyCollector();
     const replyRunner = new FakeLocalReplyRunner();
     const runtime = createHub(config, {
@@ -324,13 +325,14 @@ describe('authenticated HTTP API', () => {
       replyRunner,
       staticDir: '/nonexistent/agent-hub-web',
     });
-    collector.emit?.(devinLocalSession('glaze-spark'));
+    collector.emit?.({ ...devinLocalSession('glaze-spark'), replyRunning: true });
     try {
       const headers = { authorization: 'Bearer test-token' };
       const sessions = await runtime.app.inject({ url: '/api/sessions', headers });
       expect(sessions.json()).toEqual([
         expect.objectContaining({ id: 'devin-local:glaze-spark', canReply: true }),
       ]);
+      expect(sessions.json()[0]).not.toHaveProperty('replyRunning');
       const response = await runtime.app.inject({
         method: 'POST',
         url: `/api/sessions/${encodeURIComponent('devin-local:glaze-spark')}/messages`,
@@ -342,6 +344,56 @@ describe('authenticated HTTP API', () => {
       expect(replyRunner.sent).toEqual([
         { sessionId: 'devin-local:glaze-spark', text: 'Please add a test' },
       ]);
+      const running = await runtime.app.inject({ url: '/api/sessions', headers });
+      expect(running.json()).toEqual([
+        expect.objectContaining({
+          id: 'devin-local:glaze-spark',
+          canReply: true,
+          replyRunning: true,
+          status: 'working',
+        }),
+      ]);
+      const stopped = await runtime.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${encodeURIComponent('devin-local:glaze-spark')}/reply/stop`,
+        headers,
+      });
+      expect(stopped.statusCode).toBe(200);
+      expect(stopped.json()).toEqual({ stopped: true });
+      const noLongerRunning = await runtime.app.inject({ url: '/api/sessions', headers });
+      expect(noLongerRunning.json()[0]).not.toHaveProperty('replyRunning');
+      const nothingRunning = await runtime.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${encodeURIComponent('devin-local:glaze-spark')}/reply/stop`,
+        headers,
+      });
+      expect(nothingRunning.statusCode).toBe(409);
+      expect(nothingRunning.json()).toEqual({ error: 'Nothing is running in this chat' });
+      const unknown = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/devin-local%3Aunknown/reply/stop',
+        headers,
+      });
+      expect(unknown.statusCode).toBe(404);
+      expect(unknown.json()).toEqual({ error: 'Session not found' });
+    } finally { await runtime.close(); }
+  });
+
+  it('returns 409 when a session has no reply runner to stop', async () => {
+    const collector = new DevinLocalReplyCollector();
+    const runtime = createHub(config, {
+      collectors: [collector],
+      staticDir: '/nonexistent/agent-hub-web',
+    });
+    collector.emit?.(devinLocalSession('glaze-spark'));
+    try {
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${encodeURIComponent('devin-local:glaze-spark')}/reply/stop`,
+        headers: { authorization: 'Bearer test-token' },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({ error: 'Nothing is running in this chat' });
     } finally { await runtime.close(); }
   });
 
