@@ -927,6 +927,35 @@ describe('LocalReplyRunner', () => {
     expect(runner.stop(localSession.id)).toBe(false);
   });
 
+  it('clears a reply after escalating stop when the child ignores signals', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const localSession = devinLocalSession();
+    const runner = new LocalReplyRunner({
+      commands: { devin: 'devin.exe' },
+      resolve: async () => undefined,
+      spawn: vi.fn(() => child) as unknown as typeof spawn,
+      startupMs: 10,
+    });
+    await runner.init();
+
+    const sending = runner.send(localSession, text);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await sending;
+
+    expect(runner.stop(localSession.id)).toBe(true);
+    expect(child.kill).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(runner.isRunning(localSession.id)).toBe(true);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(runner.isRunning(localSession.id)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(runner.isRunning(localSession.id)).toBe(false);
+    expect(runner.failure(localSession.id)).toBeUndefined();
+  });
+
   it('finalizes after exit when close does not arrive', async () => {
     vi.useFakeTimers();
     const child = fakeChild();

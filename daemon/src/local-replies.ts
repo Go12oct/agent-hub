@@ -274,6 +274,7 @@ export async function resolveExecutable(name: string): Promise<string | undefine
 
 interface ActiveReply {
   child: ChildProcess;
+  stop: () => void;
   timeout?: NodeJS.Timeout;
   stopped?: boolean;
 }
@@ -372,7 +373,7 @@ export class LocalReplyRunner implements ReplyRunner {
     if (!active) return false;
     active.stopped = true;
     if (active.timeout) clearTimeout(active.timeout);
-    this.kill(active.child);
+    active.stop();
     return true;
   }
 
@@ -500,6 +501,7 @@ export class LocalReplyRunner implements ReplyRunner {
             const active = this.active.get(session.id);
             this.active.set(session.id, {
               child: queueChild,
+              stop: requestStop,
               ...(timeout ? { timeout } : {}),
               ...(active?.stopped ? { stopped: true } : {}),
             });
@@ -525,28 +527,36 @@ export class LocalReplyRunner implements ReplyRunner {
         finalize(code, error);
       };
 
+      const requestStop = () => {
+        if (finished) return;
+        if (forceKillTimer) clearTimeout(forceKillTimer);
+        if (stopGraceTimer) clearTimeout(stopGraceTimer);
+        this.kill(runningChild);
+        if (finished) return;
+        forceKillTimer = setTimeout(() => {
+          if (finished) return;
+          try {
+            runningChild.kill('SIGKILL');
+          } catch {}
+          if (finished) return;
+          stopGraceTimer = setTimeout(() => {
+            if (finished) return;
+            if (this.active.get(session.id)?.stopped !== true) {
+              pendingFailure = `Couldn't stop ${agentLabels[agent]} after timeout`;
+            }
+            finalize(null);
+          }, 30_000);
+        }, 10_000);
+      };
+
       if (agent !== 'devin') {
         timeout = setTimeout(() => {
           if (finished) return;
           pendingFailure = 'Timed out after 20 minutes';
-          this.kill(runningChild);
-          if (!finished) {
-            forceKillTimer = setTimeout(() => {
-              if (finished) return;
-              try {
-                runningChild.kill('SIGKILL');
-              } catch {}
-              if (finished) return;
-              stopGraceTimer = setTimeout(() => {
-                if (finished) return;
-                pendingFailure = `Couldn't stop ${agentLabels[agent]} after timeout`;
-                finalize(null);
-              }, 30_000);
-            }, 10_000);
-          }
+          requestStop();
         }, this.timeoutMs);
       }
-      this.active.set(session.id, { child, ...(timeout ? { timeout } : {}) });
+      this.active.set(session.id, { child, stop: requestStop, ...(timeout ? { timeout } : {}) });
       this.notify(session.id);
       console.log(`Local reply started: ${session.agent} ${session.id}`);
       startupTimer = setTimeout(() => {
