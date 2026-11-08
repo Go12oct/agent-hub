@@ -161,7 +161,7 @@ export class DevinCollector implements Collector {
       const active = new Set<string>();
       for (const row of rows) {
         const rowId = String(row.session_id || row.id || '');
-        const nativeId = this.v3 ? rowId.replace(/^devin-/, '') : rowId;
+        const nativeId = rowId;
         if (!nativeId) continue;
         const id = nativeId.startsWith('devin:') ? nativeId.slice(6) : nativeId;
         const urlId = id.replace(/^devin-/, '');

@@ -896,7 +896,7 @@ describe('Devin API mapping', () => {
     expect(emitted[0].lastMessage).toBeUndefined();
   });
 
-  it('paginates Devin v3 sessions using the PAT and normalizes session data', async () => {
+  it('paginates Devin v3 sessions using the PAT and preserves v1-compatible IDs', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -940,16 +940,48 @@ describe('Devin API mapping', () => {
       expect(requests[0]?.init?.headers).toMatchObject({ Authorization: 'Bearer fake-pat' });
       expect(requests[1]?.init?.headers).toMatchObject({ Authorization: 'Bearer fake-pat' });
       expect(emitted).toContainEqual(expect.objectContaining({
-        id: 'devin:abc123',
-        nativeId: 'abc123',
+        id: 'devin:devin-abc123',
+        nativeId: 'devin-abc123',
         status: 'needs_input',
         project: 'project',
         startedAt: new Date(1_730_000_000_000).toISOString(),
         updatedAt: new Date(1_730_000_010_000).toISOString(),
         url: 'https://app.devin.ai/sessions/abc123?source=v3',
       }));
-      expect(emitted).toContainEqual(expect.objectContaining({ id: 'devin:def456', status: 'working' }));
+      expect(emitted).toContainEqual(expect.objectContaining({ id: 'devin:devin-def456', status: 'working' }));
       expect(emitted[0]?.lastMessage).toBeUndefined();
+    } finally {
+      collector.stop();
+    }
+  });
+
+  it('uses the raw v3 session ID in the v1 message endpoint', async () => {
+    const requests: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.includes('/v3/organizations/')) {
+        return new Response(JSON.stringify({
+          items: [{
+            session_id: 'devin-abc123',
+            title: 'V3 session',
+            status: 'running',
+            status_detail: 'working',
+          }],
+          end_cursor: null,
+          has_next_page: false,
+          total: 1,
+        }));
+      }
+      return new Response(JSON.stringify({ messages: [] }));
+    };
+    const collector = new DevinCollector('fallback-api-key', fetcher, { pat: 'fake-pat', orgId: 'org-123' });
+    const emitted: AgentSession[] = [];
+    collector.start((session) => emitted.push(session));
+    try {
+      await vi.waitFor(() => expect(emitted).toHaveLength(1));
+      await collector.getMessages(emitted[0]!.nativeId, 10);
+      expect(requests).toContain('https://api.devin.ai/v1/sessions/devin-abc123');
     } finally {
       collector.stop();
     }
