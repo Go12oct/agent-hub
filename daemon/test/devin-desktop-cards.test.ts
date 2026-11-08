@@ -26,15 +26,23 @@ function toolCall(
   toolCallId = `tool-${eventType}`,
 ): Record<string, unknown> {
   return {
-    id: toolCallId,
+    id: `tool:${toolCallId}`,
     kind: 'tool_call',
     content: {
       toolCallId,
       title,
+      kind: 'tool_call',
       status,
-      _meta: { 'cognition.ai/eventType': eventType, ...metadata },
+      _meta: {
+        'cognition.ai/eventType': eventType,
+        ...Object.fromEntries(Object.entries(metadata).map(([key, value]) => [`cognition.ai/${key}`, value])),
+      },
     },
-    sourceEventType: eventType,
+    sourceEventId: `event-${toolCallId}`,
+    sourceEventTimestampMs: 1_740_000_000_000,
+    sourceEventIsStart: false,
+    sourceEventType: 'tool_call',
+    warnings: [],
   };
 }
 
@@ -73,14 +81,30 @@ describe('Devin Desktop approval cards', () => {
       userMessage,
       {
         position: 2,
-        payload: toolCall('permission_request', 'completed', {
-          requestId: 'perm-local',
-          permissionType: 'local_machine',
-          toolName: 'local_exec',
-          toolArgs: JSON.stringify({ command: 'git status' }),
-          command: 'git status --short',
-          timestamp: '2025-03-01T10:00:00.000Z',
-        }, 'Permission requested (local_machine): Command: git status --short'),
+        payload: {
+          id: 'tool:perm-local',
+          kind: 'tool_call',
+          content: {
+            toolCallId: 'tool-perm-local',
+            title: 'Permission requested (local_machine): Command: git status --short',
+            kind: 'tool_call',
+            status: 'completed',
+            _meta: {
+              'cognition.ai/eventType': 'permission_request',
+              'cognition.ai/requestId': 'perm-local',
+              'cognition.ai/permissionType': 'local_machine',
+              'cognition.ai/toolName': 'local_exec',
+              'cognition.ai/toolArgs': '{"command":"git status"}',
+              'cognition.ai/command': 'git status --short',
+              'cognition.ai/timestamp': '2025-03-01T10:00:00.000Z',
+            },
+          },
+          sourceEventId: 'event-perm-local',
+          sourceEventTimestampMs: 1_740_000_000_000,
+          sourceEventIsStart: false,
+          sourceEventType: 'tool_call',
+          warnings: [],
+        },
       },
     ]);
     await createDatabase(path.join(directory, 'resolved.db'), sessionInfo('def456'), [
@@ -99,10 +123,34 @@ describe('Devin Desktop approval cards', () => {
     ]);
     await createDatabase(path.join(directory, 'secret-open.db'), sessionInfo('bbb222'), [
       userMessage,
-      { position: 2, payload: toolCall('request_secret', 'pending', {
-        requestId: 'secret-open', secretName: 'FAKE_TOKEN', note: 'Needed for tests',
-        secretInstructions: 'Use the test account', timestamp: '2025-03-01T10:03:00.000Z',
-      }, 'Requesting secret: FAKE_TOKEN — Needed for tests') },
+      {
+        position: 2,
+        payload: {
+          id: 'tool:secret-open',
+          kind: 'tool_call',
+          content: {
+            toolCallId: 'tool-secret-open',
+            title: 'Requesting secret: FAKE_TOKEN — Needed for tests',
+            kind: 'tool_call',
+            status: 'pending',
+            _meta: {
+              'cognition.ai/eventId': 'event-secret-open',
+              'cognition.ai/eventType': 'request_secret',
+              'cognition.ai/requestId': 'secret-open',
+              'cognition.ai/timestamp': '2025-03-01T10:03:00.000Z',
+              'cognition.ai/createdAtMs': 1_740_000_000_000,
+              'cognition.ai/secretName': 'FAKE_TOKEN',
+              'cognition.ai/note': 'Needed for tests',
+              'cognition.ai/secretInstructions': 'Use the test account',
+            },
+          },
+          sourceEventId: 'event-secret-open',
+          sourceEventTimestampMs: 1_740_000_000_000,
+          sourceEventIsStart: false,
+          sourceEventType: 'tool_call',
+          warnings: [],
+        },
+      },
     ]);
     await createDatabase(path.join(directory, 'secret-answered.db'), sessionInfo('ccc333'), [
       userMessage,
@@ -170,6 +218,7 @@ describe('Devin Desktop approval cards', () => {
       summary: 'Credentials requested: FAKE_TOKEN',
       detail: 'Needed for tests\n\nUse the test account',
       readOnly: true,
+      requestedAt: '2025-03-01T10:03:00.000Z',
     }]);
     expect(cards.get('ddd444')).toMatchObject([{
       id: 'devin-card:tool-access-open',
@@ -187,14 +236,46 @@ describe('Devin Desktop approval cards', () => {
     directory = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-devin-desktop-permission-'));
     await createDatabase(path.join(directory, 'mcp.db'), sessionInfo('123abc'), [
       { position: 1, kind: 'user_message', payload: { kind: 'user_message' } },
-      { position: 2, payload: toolCall('permission_request', 'completed', {
-        requestId: 'mcp-permission',
+      {
+        position: 2,
+        payload: {
+          id: 'tool:permission-fake',
+          kind: 'tool_call',
+          content: {
+            toolCallId: 'tool-permission-fake',
+            title: 'Permission requested (devin_mcp): Run automation',
+            kind: 'tool_call',
+            status: 'completed',
+            _meta: {
+              'cognition.ai/eventId': 'event-permission-fake',
+              'cognition.ai/timestamp': '2025-03-01T11:00:00.000Z',
+              'cognition.ai/createdAtMs': 1_740_000_000_000,
+              'cognition.ai/eventType': 'permission_request',
+              'cognition.ai/requestId': 'mcp-permission',
+              'cognition.ai/permissionType': 'devin_mcp',
+              'cognition.ai/command': 'fake command',
+              'cognition.ai/toolName': 'devin_automation_manage',
+              'cognition.ai/toolArgs': { operation: 'run', count: 2 },
+              'cognition.ai/approvedCallId': 'approved-fake-call',
+              'cognition.ai/requestedPermissions': ['devin_automation_manage'],
+              'cognition.ai/resourceTitle': 'BTECCheck outreach autopilot',
+              'cognition.ai/priority': 1,
+            },
+          },
+          sourceEventId: 'event-permission-fake',
+          sourceEventTimestampMs: 1_740_000_000_000,
+          sourceEventIsStart: false,
+          sourceEventType: 'tool_call',
+          warnings: [],
+        },
+      },
+      { position: 3, payload: toolCall('permission_request', 'completed', {
+        requestId: 'mcp-title-fallback',
         permissionType: 'devin_mcp',
-        toolName: 'devin_automation_manage',
-        toolArgs: '{"operation":"run","count":2}',
-        resourceTitle: 'BTECCheck outreach autopilot',
-        timestamp: '2025-03-01T11:00:00.000Z',
-      }) },
+        toolName: 'devin_mcp_tool',
+        toolArgs: { action: 'inspect' },
+        timestamp: '2025-03-01T11:01:00.000Z',
+      }, 'Permission requested (devin_mcp): Manual approval') },
     ]);
 
     expect(readDevinDesktopCards(directory).get('123abc')).toMatchObject([{
@@ -203,6 +284,11 @@ describe('Devin Desktop approval cards', () => {
       summary: 'devin_automation_manage — BTECCheck outreach autopilot',
       detail: '{\n  "operation": "run",\n  "count": 2\n}',
       readOnly: true,
+      requestedAt: '2025-03-01T11:00:00.000Z',
+    }, {
+      id: 'devin-card:mcp-title-fallback',
+      summary: '(devin_mcp): Manual approval',
+      requestedAt: '2025-03-01T11:01:00.000Z',
     }]);
   });
 });

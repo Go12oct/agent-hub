@@ -129,20 +129,20 @@ function readDatabase(file: string): Map<string, PendingApproval[]> {
     const rows = database.prepare(`
       SELECT
         position,
-        json_extract(payload, '$.title') AS title,
+        json_extract(payload, '$.content.title') AS title,
         json_extract(payload, '$.content.status') AS status,
         json_extract(payload, '$.content.toolCallId') AS toolCallId,
         json_extract(payload, '${eventTypePath}') AS eventType,
-        json_extract(payload, '$.content._meta.requestId') AS requestId,
-        json_extract(payload, '$.content._meta.permissionType') AS permissionType,
-        json_extract(payload, '$.content._meta.toolName') AS toolName,
-        json_extract(payload, '$.content._meta.toolArgs') AS toolArgs,
-        json_extract(payload, '$.content._meta.command') AS command,
-        json_extract(payload, '$.content._meta.resourceTitle') AS resourceTitle,
-        json_extract(payload, '$.content._meta.timestamp') AS timestamp,
-        json_extract(payload, '$.content._meta.secretName') AS secretName,
-        json_extract(payload, '$.content._meta.note') AS note,
-        json_extract(payload, '$.content._meta.secretInstructions') AS secretInstructions
+        json_extract(payload, '$.content._meta."cognition.ai/requestId"') AS requestId,
+        json_extract(payload, '$.content._meta."cognition.ai/permissionType"') AS permissionType,
+        json_extract(payload, '$.content._meta."cognition.ai/toolName"') AS toolName,
+        json_extract(payload, '$.content._meta."cognition.ai/toolArgs"') AS toolArgs,
+        json_extract(payload, '$.content._meta."cognition.ai/command"') AS command,
+        json_extract(payload, '$.content._meta."cognition.ai/resourceTitle"') AS resourceTitle,
+        json_extract(payload, '$.content._meta."cognition.ai/timestamp"') AS timestamp,
+        json_extract(payload, '$.content._meta."cognition.ai/secretName"') AS secretName,
+        json_extract(payload, '$.content._meta."cognition.ai/note"') AS note,
+        json_extract(payload, '$.content._meta."cognition.ai/secretInstructions"') AS secretInstructions
       FROM messages
       WHERE position > ? AND kind = 'tool_call'
         AND json_extract(payload, '${eventTypePath}') IN (
