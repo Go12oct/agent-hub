@@ -558,6 +558,7 @@ export function AgentHub() {
             </div>
             <button className="sheet-btn danger" onClick={() => void disconnect()}><LogOut size={18} /> Disconnect this phone</button>
             <button className="sheet-btn" onClick={() => setSettingsOpen(false)}>Close</button>
+            <div className="version-note">Agent Hub v{__APP_VERSION__}</div>
           </div>
         </div>
       )}

@@ -176,6 +176,7 @@ a { color: var(--text); }
 .setting-note { margin: 12px 0 16px; color: var(--text-2); font-size: 14px; line-height: 20px; }
 .sheet-btn { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); font-weight: 500; }
 .sheet-btn.danger { color: var(--error); }
+.version-note { margin-top: 12px; color: var(--muted); font-family: var(--mono); font-size: 11px; text-align: center; }
 
 /* Chat */
 .chat { display: flex; height: 100dvh; flex-direction: column; background: var(--bg); }
