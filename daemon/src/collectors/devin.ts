@@ -1,7 +1,10 @@
+import { statSync } from 'node:fs';
 import os from 'node:os';
-import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
+import path from 'node:path';
+import type { AgentSession, PendingApproval, SessionMessage, SessionStatus } from '@agent-hub/shared';
 import type { Collector, EmitSession } from './types.js';
 import { projectName } from './files.js';
+import { readDevinDesktopCards } from './devin-desktop-cards.js';
 
 export function parseDevinMessages(rows: unknown): SessionMessage[] {
   if (!Array.isArray(rows)) return [];
@@ -23,6 +26,38 @@ export function parseDevinMessages(rows: unknown): SessionMessage[] {
 interface CachedDevinMessages {
   updatedAt: string;
   messages: SessionMessage[];
+}
+
+interface DevinDesktopCardsOptions {
+  dir?: string;
+  platform?: NodeJS.Platform;
+  readCards?: typeof readDevinDesktopCards;
+}
+
+function desktopSessionKeys(session: AgentSession): string[] {
+  const keys = new Set<string>();
+  const add = (value: string | undefined) => {
+    const key = value?.replace(/^devin-/i, '').toLowerCase();
+    if (key && /^[a-f\d]+$/.test(key)) keys.add(key);
+  };
+  add(session.url ? /\/sessions\/([^/?#]+)/i.exec(session.url)?.[1] : undefined);
+  add(session.nativeId);
+  return [...keys];
+}
+
+function cardsForSession(
+  session: AgentSession,
+  cardsBySession: Map<string, PendingApproval[]>,
+): PendingApproval[] {
+  const cards = new Map<string, PendingApproval>();
+  for (const key of desktopSessionKeys(session)) {
+    for (const card of cardsBySession.get(key) ?? []) cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+
+function approvalSet(session?: AgentSession): PendingApproval[] {
+  return session?.approvals ?? (session?.approval ? [session.approval] : []);
 }
 
 export function mapDevinStatus(value: unknown): SessionStatus {
@@ -78,19 +113,35 @@ export class DevinCollector implements Collector {
   name = 'devin';
   private emit?: EmitSession;
   private timer?: NodeJS.Timeout;
+  private desktopCardsTimer?: NodeJS.Timeout;
   private messagesById = new Map<string, CachedDevinMessages>();
   private sessions = new Map<string, AgentSession>();
+  private apiSessions = new Map<string, AgentSession>();
+  private desktopCards = new Map<string, PendingApproval[]>();
+  private desktopCardsDir?: string;
+  private readonly desktopCardsReader: typeof readDevinDesktopCards;
   constructor(
     private apiKey: string | undefined,
     private fetcher: typeof fetch = fetch,
     private v3?: { pat: string; orgId: string },
-  ) {}
+    private desktopCardsOptions?: DevinDesktopCardsOptions,
+  ) {
+    this.desktopCardsReader = desktopCardsOptions?.readCards ?? readDevinDesktopCards;
+  }
   start(emit: EmitSession): void {
     this.emit = emit;
     void this.poll();
     this.timer = setInterval(() => void this.poll(), 30_000);
+    this.desktopCardsDir = this.desktopCardsDirectory();
+    if (this.desktopCardsDir) {
+      this.pollDesktopCards();
+      this.desktopCardsTimer = setInterval(() => this.pollDesktopCards(), 5_000);
+    }
   }
-  stop(): void { if (this.timer) clearInterval(this.timer); }
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    if (this.desktopCardsTimer) clearInterval(this.desktopCardsTimer);
+  }
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
     if (!this.apiKey) return [];
     const id = `devin:${nativeId}`;
@@ -108,9 +159,11 @@ export class DevinCollector implements Collector {
         this.messagesById.set(nativeId, { updatedAt, messages });
       }
       const lastMessage = messages.filter((item) => item.role !== 'tool').at(-1);
-      const session = this.sessions.get(id);
-      if (session && lastMessage) {
-        const updated = { ...session, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
+      const baseSession = this.apiSessions.get(id);
+      if (baseSession && lastMessage) {
+        const updatedBase = { ...baseSession, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
+        this.apiSessions.set(id, updatedBase);
+        const updated = this.withDesktopCards(updatedBase);
         this.sessions.set(id, updated);
         this.emit?.(updated);
       }
@@ -198,11 +251,14 @@ export class DevinCollector implements Collector {
             : `https://app.devin.ai/sessions/${encodeURIComponent(urlId)}`,
           machine: os.hostname(),
         };
-        this.sessions.set(session.id, session);
-        this.emit?.(session);
+        this.apiSessions.set(session.id, session);
+        const updated = this.withDesktopCards(session);
+        this.sessions.set(session.id, updated);
+        this.emit?.(updated);
       }
-      for (const id of this.sessions.keys()) {
+      for (const id of this.apiSessions.keys()) {
         if (active.has(id)) continue;
+        this.apiSessions.delete(id);
         this.sessions.delete(id);
         this.messagesById.delete(id.slice('devin:'.length));
         this.emit?.remove?.(id);
@@ -210,5 +266,44 @@ export class DevinCollector implements Collector {
     } catch (error) {
       console.warn(`[devin] polling failed: ${(error as Error).message}`);
     }
+  }
+
+  protected pollDesktopCards(): void {
+    const directory = this.desktopCardsDir;
+    if (!directory) return;
+    let next = new Map<string, PendingApproval[]>();
+    try {
+      if (statSync(directory).isDirectory()) next = this.desktopCardsReader(directory);
+    } catch { /* The Desktop mirror may be unavailable while the app is closed. */ }
+    for (const baseSession of this.apiSessions.values()) {
+      const previous = this.sessions.get(baseSession.id);
+      const updated = this.withDesktopCards(baseSession, next);
+      if (JSON.stringify(approvalSet(previous)) === JSON.stringify(approvalSet(updated))) continue;
+      this.sessions.set(updated.id, updated);
+      this.emit?.(updated);
+    }
+    this.desktopCards = next;
+  }
+
+  private desktopCardsDirectory(): string | undefined {
+    const platform = this.desktopCardsOptions?.platform ?? process.platform;
+    if (platform !== 'win32') return undefined;
+    if (this.desktopCardsOptions?.dir) return this.desktopCardsOptions.dir;
+    const appData = process.env.APPDATA;
+    return appData ? path.join(appData, 'Devin', 'User', 'acp-messages') : undefined;
+  }
+
+  private withDesktopCards(
+    session: AgentSession,
+    cardsBySession = this.desktopCards,
+  ): AgentSession {
+    const cards = cardsForSession(session, cardsBySession);
+    if (cards.length) {
+      return { ...session, status: 'needs_input', approval: cards[0], approvals: cards };
+    }
+    const cleared = { ...session };
+    delete cleared.approval;
+    delete cleared.approvals;
+    return cleared;
   }
 }

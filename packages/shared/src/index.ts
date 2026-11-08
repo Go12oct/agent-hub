@@ -7,6 +7,7 @@ export interface PendingApproval {
   toolName: string;
   summary: string;
   detail?: string;
+  readOnly?: boolean;
   questions?: Array<{
     question: string;
     header?: string;

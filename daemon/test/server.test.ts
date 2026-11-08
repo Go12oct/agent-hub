@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentSession } from '@agent-hub/shared';
+import type { AgentSession, PendingApproval } from '@agent-hub/shared';
 import type { Collector, EmitSession } from '../src/collectors/types';
 import {
   LocalReplyRunner, ReplyBusyError, ReplyFailedError, type ReplyAgent, type ReplyRunner,
@@ -89,6 +89,52 @@ function devinLocalSession(nativeId: string): AgentSession {
 }
 
 describe('authenticated HTTP API', () => {
+  it('rejects read-only Devin Desktop approvals instead of forwarding a decision', async () => {
+    class DevinCollector extends FakeCollector {
+      name = 'devin';
+      sent: string[] = [];
+      async sendMessage(_nativeId: string, text: string): Promise<void> { this.sent.push(text); }
+    }
+    const collector = new DevinCollector();
+    const runtime = createHub(config, { collectors: [collector], staticDir: '/nonexistent/agent-hub-web' });
+    const approval: PendingApproval = {
+      id: 'devin-card:permission-1',
+      toolName: 'Run a command',
+      summary: 'Run a command on your PC',
+      requestedAt: new Date().toISOString(),
+      readOnly: true,
+    };
+    try {
+      collector.emit?.({
+        ...testSession('devin', 'abc123'),
+        status: 'needs_input',
+        approval,
+        approvals: [approval],
+      });
+      const feed = await runtime.app.inject({
+        url: '/api/sessions',
+        headers: { authorization: `Bearer ${config.token}` },
+      });
+      expect(feed.json()).toMatchObject([{
+        id: 'devin:abc123',
+        status: 'needs_input',
+        approval,
+        approvals: [approval],
+      }]);
+      const response = await runtime.app.inject({
+        method: 'POST',
+        url: '/api/sessions/devin:abc123/approval',
+        headers: { authorization: `Bearer ${config.token}` },
+        payload: { decision: 'allow', approvalId: approval.id, answers: 'invalid' },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({ error: 'Answer this in Devin' });
+      expect(collector.sent).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('starts Devin v3 listing from PAT and organization credentials without a v1 API key', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher: typeof fetch = async (input, init) => {

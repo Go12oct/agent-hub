@@ -150,6 +150,43 @@ describe('ntfy notifications', () => {
     expect(ntfyMessage(session({ status: 'error' })).title).toBe('Claude Code hit an error — repo');
   });
 
+  it('notifies on Devin Desktop approvals with the approval summary and per-card sequence', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
+    const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    const approval = {
+      id: 'devin-card:permission-1',
+      toolName: 'Run a command',
+      summary: 'Run a command on your PC',
+      requestedAt: new Date().toISOString(),
+      readOnly: true,
+    };
+    const pending = session({
+      id: 'devin:abc123',
+      agent: 'devin',
+      status: 'needs_input',
+      approval,
+      approvals: [approval],
+    });
+    expect(ntfyMessage(pending)).toMatchObject({
+      title: 'Devin needs you — repo',
+      body: approval.summary,
+      priority: 'high',
+    });
+
+    await notifier.update(session({ id: pending.id, agent: 'devin', status: 'working' }));
+    await notifier.update(pending);
+    await notifier.update(pending);
+    const posts = fetchImpl.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(posts).toHaveLength(1);
+    const request = posts[0]![1]!;
+    expect(request.headers).toMatchObject({
+      Title: 'Devin needs you - repo',
+      Priority: 'high',
+      'X-Sequence-ID': 'ah-devin-card:permission-1',
+    });
+    expect(request.body).toBe(approval.summary);
+  });
+
   it('posts to the topic with a Click header and only on real transitions', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const notifier = new NtfyNotifier({ topic: 'secret topic' }, fetchImpl as unknown as typeof fetch);

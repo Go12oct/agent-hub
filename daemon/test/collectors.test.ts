@@ -3,7 +3,7 @@ import type { Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentSession } from '@agent-hub/shared';
+import type { AgentSession, PendingApproval } from '@agent-hub/shared';
 import { CodexCollector, parseCodexRecords } from '../src/collectors/codex';
 import { ClaudeCollector, claudeHookOverride, mapClaudeHook, parseClaudeRecords } from '../src/collectors/claude';
 import { AntigravityCollector, parseAntigravityRecords } from '../src/collectors/antigravity';
@@ -894,6 +894,50 @@ describe('Devin API mapping', () => {
     collector.stop();
     expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'working', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
     expect(emitted[0].lastMessage).toBeUndefined();
+  });
+
+  it('merges Devin Desktop cards and restores the API status when they clear', async () => {
+    const desktopDir = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-devin-desktop-merge-'));
+    const approval: PendingApproval = {
+      id: 'devin-card:permission-1',
+      toolName: 'Run a command',
+      summary: 'Run a command on your PC',
+      detail: 'git status',
+      requestedAt: new Date().toISOString(),
+      readOnly: true,
+    };
+    let cards = new Map<string, PendingApproval[]>([['abc123', [approval]]]);
+    const fetcher: typeof fetch = async () => new Response(JSON.stringify([{
+      session_id: 'abc123',
+      status_enum: 'working',
+      title: 'Desktop session',
+    }]));
+    class TestDevinCollector extends DevinCollector {
+      refreshDesktopCards(): void { this.pollDesktopCards(); }
+    }
+    const collector = new TestDevinCollector('fake-key', fetcher, undefined, {
+      dir: desktopDir,
+      platform: 'win32',
+      readCards: () => cards,
+    });
+    const emitted: AgentSession[] = [];
+    collector.start((session) => emitted.push(session));
+    try {
+      await vi.waitFor(() => expect(emitted.at(-1)).toMatchObject({
+        status: 'needs_input',
+        approval,
+        approvals: [approval],
+      }));
+
+      cards = new Map();
+      collector.refreshDesktopCards();
+      expect(emitted.at(-1)).toMatchObject({ status: 'working' });
+      expect(emitted.at(-1)?.approval).toBeUndefined();
+      expect(emitted.at(-1)?.approvals).toBeUndefined();
+    } finally {
+      collector.stop();
+      await rm(desktopDir, { recursive: true, force: true });
+    }
   });
 
   it('paginates Devin v3 sessions using the PAT and preserves v1-compatible IDs', async () => {

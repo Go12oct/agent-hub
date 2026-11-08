@@ -3,7 +3,7 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AgentSession } from '@agent-hub/shared';
+import type { AgentSession, PendingApproval } from '@agent-hub/shared';
 import type { QueueItem } from '../home';
 import { ChatView, DeckCard, FinishedGroupHeader, statusLabel } from './AgentHub';
 
@@ -138,6 +138,84 @@ describe('Devin deck link', () => {
     expect(onClick).not.toHaveBeenCalled();
     expect(onOpen).not.toHaveBeenCalled();
     expect(onDecide).not.toHaveBeenCalled();
+  });
+});
+
+describe('read-only Devin approvals', () => {
+  const approval: PendingApproval = {
+    id: 'devin-card:permission-1',
+    toolName: 'Run a command',
+    summary: 'Run a command on your PC',
+    detail: 'git status --short',
+    requestedAt: new Date().toISOString(),
+    readOnly: true,
+  };
+  const session: AgentSession = {
+    id: 'devin:abc123',
+    agent: 'devin',
+    nativeId: 'abc123',
+    title: 'Cloud session',
+    status: 'needs_input',
+    canReply: false,
+    approval,
+    approvals: [approval],
+    updatedAt: new Date().toISOString(),
+    url: 'https://app.devin.ai/sessions/abc123',
+    machine: 'desktop',
+  };
+
+  it('shows Open in Devin and no decision controls in the deck', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const onDecide = vi.fn();
+    const container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(DeckCard, {
+        item: { kind: 'approval', session, approval },
+        depth: 0,
+        onOpen: vi.fn(),
+        onDecide,
+      }));
+    });
+    const card = container.querySelector('.deck-card');
+    const link = card?.querySelector<HTMLAnchorElement>('.deck-readonly-open-in');
+    expect(card?.textContent).toContain(approval.summary);
+    expect(card?.querySelector('.deck-readonly-detail')?.textContent).toBe(approval.detail);
+    expect(link?.textContent).toContain('Open in Devin');
+    expect(link?.href).toBe(session.url);
+    expect(link?.target).toBe('_blank');
+    expect(link?.rel).toBe('noreferrer');
+    expect(card?.querySelector('.deck-actions')).toBeNull();
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('shows the read-only approval in chat without Allow or Deny controls', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: () => {},
+    });
+    const container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(ChatView, {
+        session,
+        pairing: { url: 'http://hub.test', token: 'pair-token' },
+        onBack: () => {},
+      }));
+    });
+    const card = container.querySelector('.approval-read-only');
+    const link = card?.querySelector<HTMLAnchorElement>('.approval-open-in');
+    expect(card?.textContent).toContain(approval.summary);
+    expect(card?.querySelector('.approval-read-only-detail')?.textContent).toBe(approval.detail);
+    expect(link?.textContent).toContain('Open in Devin');
+    expect(link?.href).toBe(session.url);
+    expect(card?.querySelector('.approval-actions')).toBeNull();
+    expect(card?.textContent).not.toContain('Allow');
+    expect(card?.textContent).not.toContain('Deny');
   });
 });
 

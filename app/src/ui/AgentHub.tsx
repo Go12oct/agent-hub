@@ -480,7 +480,7 @@ export function AgentHub() {
   }
 
   async function decide(item: QueueItem, decision: 'allow' | 'deny') {
-    if (item.kind !== 'approval' || !pairing) return;
+    if (item.kind !== 'approval' || item.approval.readOnly || !pairing) return;
     const { session, approval } = item;
     setHiddenApprovalIds((current) => new Set(current).add(approval.id));
     setDecisionErrors((current) => {
@@ -652,7 +652,7 @@ export function DeckCard({
   const committing = useRef(false);
   const approval = item.kind === 'approval' ? item.approval : undefined;
   const questions = approval?.questions ?? [];
-  const swipeable = Boolean(approval && questions.length === 0 && depth === 0);
+  const swipeable = Boolean(approval && !approval.readOnly && questions.length === 0 && depth === 0);
   const preview = item.kind === 'input' && item.session.lastMessage ? previewText(item.session.lastMessage) : '';
   const depthIndex = Math.min(depth, 3);
   const y = [0, 12, 24, 24][depthIndex]!;
@@ -713,7 +713,14 @@ export function DeckCard({
         <span className={`status ${item.session.status}`}>{statusLabel(item.session)}</span>
       )}
       {approval ? (
-        questions.length > 0
+        approval.readOnly
+          ? (
+            <div className="deck-readonly-copy">
+              <div className="deck-summary">{approval.summary}</div>
+              {approval.detail && <pre className="deck-readonly-detail">{approval.detail}</pre>}
+            </div>
+          )
+          : questions.length > 0
           ? <p className="deck-question">{questions[0]?.question}</p>
           : (
             <div className="deck-tool">
@@ -723,7 +730,19 @@ export function DeckCard({
           )
       ) : <p className="deck-input">{preview}</p>}
       {error && <div className="alert small">{error}</div>}
-      {!approval && item.kind === 'input' && item.session.agent === 'devin' && item.session.url ? (
+      {approval?.readOnly ? (
+        item.session.url && (
+          <a
+            className="deck-primary deck-readonly-open-in"
+            href={item.session.url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            Open in Devin <ExternalLink size={16} />
+          </a>
+        )
+      ) : !approval && item.kind === 'input' && item.session.agent === 'devin' && item.session.url ? (
         <div className="deck-input-actions">
           <button className="deck-primary" onClick={(event) => {
             const source = event.currentTarget.closest<HTMLElement>('.deck-card');
@@ -1253,6 +1272,26 @@ function ApprovalCard({ session, approval, pairing }: { session: AgentSession; a
       setError(error);
       setBusy(undefined);
     }
+  }
+  if (approval.readOnly) {
+    return (
+      <section className="approval approval-read-only" aria-live="polite">
+        <div className="approval-head"><ShieldAlert size={18} /><span>{agentLabels[session.agent]} wants permission</span></div>
+        <code className="approval-summary">{approval.summary}</code>
+        {approval.detail && <pre className="approval-read-only-detail">{approval.detail}</pre>}
+        {session.url && (
+          <a
+            className="primary approval-open-in"
+            href={session.url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            Open in Devin <ExternalLink size={16} />
+          </a>
+        )}
+      </section>
+    );
   }
   return (
     <section className="approval" aria-live="polite">

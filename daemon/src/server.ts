@@ -113,7 +113,11 @@ export function createHub(
 
   const present = (session: AgentSession): AgentSession => {
     const failure = replyRunner?.failure(session.id);
-    const pending = approvals.pending(session.id);
+    const pendingById = new Map(approvals.pending(session.id).map((item) => [item.id, item]));
+    for (const item of session.approvals ?? (session.approval ? [session.approval] : [])) {
+      pendingById.set(item.id, item);
+    }
+    const pending = [...pendingById.values()];
     const approval = pending[0];
     const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
     const isReplyRunning = Boolean(replyRunner?.isRunning(session.id));
@@ -297,6 +301,14 @@ export function createHub(
     if (decision !== 'allow' && decision !== 'deny') {
       return reply.code(400).send({ error: 'decision must be "allow" or "deny"' });
     }
+    const approvalId = typeof request.body?.approvalId === 'string' ? request.body.approvalId : undefined;
+    const pendingById = new Map(approvals.pending(session.id).map((item) => [item.id, item]));
+    for (const item of session.approvals ?? (session.approval ? [session.approval] : [])) {
+      pendingById.set(item.id, item);
+    }
+    const pending = [...pendingById.values()];
+    const target = approvalId ? pending.find((item) => item.id === approvalId) : pending[0];
+    if (target?.readOnly) return reply.code(409).send({ error: 'Answer this in Devin' });
     let answers: Record<string, string> | undefined;
     if (request.body.answers !== undefined) {
       if (!request.body.answers || typeof request.body.answers !== 'object' || Array.isArray(request.body.answers)) {
@@ -308,9 +320,6 @@ export function createHub(
       }
       answers = Object.fromEntries(entries) as Record<string, string>;
     }
-    const approvalId = typeof request.body?.approvalId === 'string' ? request.body.approvalId : undefined;
-    const pending = approvals.pending(session.id);
-    const target = approvalId ? pending.find((item) => item.id === approvalId) : pending[0];
     if (decision === 'allow' && target?.toolName === 'AskUserQuestion') {
       const questions = target.questions ?? [];
       if (!questions.length || questions.some((question) => !answers?.[question.question]?.trim())) {

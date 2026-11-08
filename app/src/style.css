@@ -237,6 +237,8 @@ a { color: var(--text); }
 .approval-head svg { color: var(--accent); }
 .approval-summary { display: block; margin: 12px 0 0; padding: 8px 12px; border-radius: 8px; background: var(--raised); color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 20px; white-space: pre-wrap; word-break: break-word; }
 .approval-detail { margin: 8px 0 0; color: var(--text-2); font-size: 13px; line-height: 20px; }
+.approval-read-only-detail { max-height: 160px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--raised); color: var(--text-2); font-family: var(--mono); font-size: 13px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-open-in { width: 100%; margin-top: 12px; text-decoration: none; }
 .approval-question { margin-top: 12px; font-size: 14px; line-height: 20px; }
 .approval-question strong { font-weight: 500; }
 .approval-question p { margin: 4px 0 0; }
@@ -262,6 +264,9 @@ a { color: var(--text); }
 .deck-who time { flex: 0 0 auto; margin-left: auto; padding-right: 64px; color: var(--accent); font-family: var(--mono); font-size: 12px; }
 .deck-title { display: -webkit-box; overflow: hidden; margin: 12px 0 0; color: var(--text-2); font-size: 15px; font-weight: 500; line-height: 20px; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .deck-tool { overflow: hidden; margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: var(--bg-deep); font-family: var(--mono); font-size: 13px; line-height: 20px; }
+.deck-readonly-copy { overflow: auto; max-height: 150px; margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: var(--bg-deep); font-family: var(--mono); font-size: 13px; line-height: 20px; }
+.deck-readonly-detail { max-height: 90px; overflow: auto; margin: 8px 0 0; padding: 8px; border-radius: 8px; background: var(--raised); color: var(--text-2); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.deck-readonly-open-in { display: flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
 .deck-summary { overflow-wrap: anywhere; }
 .deck-summary::before { content: '› '; color: var(--accent); }
 .deck-detail { display: -webkit-box; overflow: hidden; margin-top: 2px; color: var(--muted); -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }

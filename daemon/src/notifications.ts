@@ -10,6 +10,14 @@ export function sessionDeepLink(sessionId: string): string {
 export function ntfyMessage(session: AgentSession): { title: string; body: string; priority: string; tags: string } {
   const label = agentLabels[session.agent];
   const where = session.project || session.title;
+  if (session.status === 'needs_input' && session.agent === 'devin' && session.approval) {
+    return {
+      title: `${label} needs you — ${where}`,
+      body: session.approval.summary,
+      priority: 'high',
+      tags: 'raised_hand',
+    };
+  }
   if (session.status === 'needs_input' && session.agent === 'devin') {
     return {
       title: `${label} is waiting on you — ${where}`,
