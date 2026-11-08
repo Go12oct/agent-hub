@@ -4,7 +4,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSession } from '@agent-hub/shared';
-import { ChatView, statusLabel } from './AgentHub';
+import { ChatView, FinishedGroupHeader, statusLabel } from './AgentHub';
 
 let root: Root | undefined;
 
@@ -38,6 +38,43 @@ describe('session status labels', () => {
         requestedAt: new Date().toISOString(),
       },
     })).toBe('Needs you');
+  });
+});
+
+describe('finished group header', () => {
+  it('shows a plain count while searching and keeps the toggle otherwise', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const onToggle = vi.fn();
+    const container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(createElement(FinishedGroupHeader, {
+        count: 3,
+        search: 'tests',
+        finishedOpen: true,
+        onToggle,
+      }));
+    });
+    const label = container.querySelector('.finished-toggle');
+    expect(label?.tagName).toBe('DIV');
+    expect(label?.textContent).toBe('3 finished or idle');
+    expect(container.querySelector('button')).toBeNull();
+    expect(onToggle).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root?.render(createElement(FinishedGroupHeader, {
+        count: 3,
+        search: '',
+        finishedOpen: false,
+        onToggle,
+      }));
+    });
+    const toggle = container.querySelector<HTMLButtonElement>('button.finished-toggle');
+    expect(toggle?.textContent).toBe('3 finished or idleShow');
+    await act(async () => toggle?.click());
+    expect(onToggle).toHaveBeenCalledTimes(1);
   });
 });
 

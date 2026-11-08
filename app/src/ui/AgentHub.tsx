@@ -35,6 +35,26 @@ export function statusLabel(session: AgentSession): string {
   return statusLabels[session.status];
 }
 
+export function FinishedGroupHeader({
+  count,
+  search,
+  finishedOpen,
+  onToggle,
+}: {
+  count: number;
+  search: string;
+  finishedOpen: boolean;
+  onToggle: () => void;
+}) {
+  const label = `${count} finished or idle`;
+  if (search) return <div className="finished-toggle">{label}</div>;
+  return (
+    <button className="finished-toggle" onClick={onToggle}>
+      <span>{label}</span><span>{finishedOpen ? 'Hide' : 'Show'}</span>
+    </button>
+  );
+}
+
 type NativeViewTransition = { finished: Promise<void> };
 type ViewTransitionDocument = Document & {
   startViewTransition?: (callback: () => void) => NativeViewTransition;
@@ -540,9 +560,12 @@ export function AgentHub() {
             </LayoutGroup>
             {groups.recent.length > 0 && (
               <>
-                <button className="finished-toggle" onClick={() => setFinishedOpen((value) => !value)}>
-                  <span>{groups.recent.length} finished or idle</span><span>{search || finishedOpen ? 'Hide' : 'Show'}</span>
-                </button>
+                <FinishedGroupHeader
+                  count={groups.recent.length}
+                  search={search}
+                  finishedOpen={finishedOpen}
+                  onToggle={() => setFinishedOpen((value) => !value)}
+                />
                 {(search || finishedOpen) && dayGroups(groups.recent).map(([title, items]) => (
                   <Group key={title} title={title} sessions={items} transitionSessionId={transitionSessionId} onOpen={openSession} />
                 ))}
