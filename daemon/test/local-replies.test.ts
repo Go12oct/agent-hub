@@ -905,10 +905,11 @@ describe('LocalReplyRunner', () => {
     vi.useFakeTimers();
     const child = fakeChild();
     const localSession = devinLocalSession();
+    const spawnProcess = vi.fn(() => child);
     const runner = new LocalReplyRunner({
       commands: { devin: 'devin.exe' },
       resolve: async () => undefined,
-      spawn: vi.fn(() => child) as unknown as typeof spawn,
+      spawn: spawnProcess as unknown as typeof spawn,
       startupMs: 10,
     });
     await runner.init();
@@ -920,7 +921,14 @@ describe('LocalReplyRunner', () => {
 
     expect(runner.isRunning(localSession.id)).toBe(true);
     expect(runner.stop(localSession.id)).toBe(true);
-    expect(child.kill).toHaveBeenCalledTimes(1);
+    if (process.platform === 'win32') {
+      expect(spawnProcess).toHaveBeenCalledWith('taskkill', ['/pid', '1234', '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+    } else {
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    }
     child.emit('exit', 1);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(runner.isRunning(localSession.id)).toBe(false);
@@ -932,10 +940,11 @@ describe('LocalReplyRunner', () => {
     vi.useFakeTimers();
     const child = fakeChild();
     const localSession = devinLocalSession();
+    const spawnProcess = vi.fn(() => child);
     const runner = new LocalReplyRunner({
       commands: { devin: 'devin.exe' },
       resolve: async () => undefined,
-      spawn: vi.fn(() => child) as unknown as typeof spawn,
+      spawn: spawnProcess as unknown as typeof spawn,
       startupMs: 10,
     });
     await runner.init();
@@ -946,9 +955,16 @@ describe('LocalReplyRunner', () => {
     await sending;
 
     expect(runner.stop(localSession.id)).toBe(true);
-    expect(child.kill).toHaveBeenCalledTimes(1);
+    if (process.platform === 'win32') {
+      expect(spawnProcess).toHaveBeenCalledWith('taskkill', ['/pid', '1234', '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+    } else {
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    }
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     expect(runner.isRunning(localSession.id)).toBe(true);
     await vi.advanceTimersByTimeAsync(29_999);
     expect(runner.isRunning(localSession.id)).toBe(true);
