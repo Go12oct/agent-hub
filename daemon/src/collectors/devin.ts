@@ -39,13 +39,52 @@ export function mapDevinStatus(value: unknown): SessionStatus {
   }
 }
 
+export function mapDevinV3Status(status: unknown, statusDetail: unknown): SessionStatus {
+  switch (String(status || '').toLowerCase()) {
+    case 'running':
+      switch (String(statusDetail || '').toLowerCase()) {
+        case 'waiting_for_user':
+        case 'waiting_for_approval':
+          return 'needs_input';
+        case 'finished':
+          return 'done';
+        default:
+          return 'working';
+      }
+    case 'new':
+    case 'claimed':
+    case 'resuming':
+      return 'working';
+    case 'exit':
+      return 'done';
+    case 'error':
+      return 'error';
+    case 'suspended':
+      return 'idle';
+    default:
+      return 'idle';
+  }
+}
+
+function timestampToIso(value: unknown): string | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  if (typeof value === 'string' && !value.trim()) return undefined;
+  const number = Number(value);
+  const date = new Date(Number.isFinite(number) ? number * 1000 : value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
 export class DevinCollector implements Collector {
   name = 'devin';
   private emit?: EmitSession;
   private timer?: NodeJS.Timeout;
   private messagesById = new Map<string, CachedDevinMessages>();
   private sessions = new Map<string, AgentSession>();
-  constructor(private apiKey: string, private fetcher: typeof fetch = fetch) {}
+  constructor(
+    private apiKey: string,
+    private fetcher: typeof fetch = fetch,
+    private v3?: { pat: string; orgId: string },
+  ) {}
   start(emit: EmitSession): void {
     this.emit = emit;
     void this.poll();
@@ -89,32 +128,59 @@ export class DevinCollector implements Collector {
   protected async poll(): Promise<void> {
     try {
       const rows: any[] = [];
-      for (let page = 0; page < 10; page++) {
-        const offset = page * 100;
-        const response = await this.fetcher(`https://api.devin.ai/v1/sessions?limit=100&offset=${offset}`, {
-          headers: { Authorization: `Bearer ${this.apiKey}` },
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json() as any;
-        const pageRows = Array.isArray(data) ? data : data.sessions;
-        if (!Array.isArray(pageRows)) throw new Error('Invalid sessions response');
-        rows.push(...pageRows);
-        if (pageRows.length < 100) break;
+      if (this.v3) {
+        let after: string | undefined;
+        for (let page = 0; page < 10; page++) {
+          const cursor = after === undefined ? '' : `&after=${encodeURIComponent(after)}`;
+          const response = await this.fetcher(
+            `https://api.devin.ai/v3/organizations/${encodeURIComponent(this.v3.orgId)}/sessions?first=100${cursor}`,
+            { headers: { Authorization: `Bearer ${this.v3.pat}` } },
+          );
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json() as any;
+          if (!Array.isArray(data.items)) throw new Error('Invalid v3 sessions response');
+          rows.push(...data.items);
+          if (!data.has_next_page || page === 9) break;
+          if (typeof data.end_cursor !== 'string' || !data.end_cursor) throw new Error('Invalid v3 sessions cursor');
+          after = data.end_cursor;
+        }
+      } else {
+        for (let page = 0; page < 10; page++) {
+          const offset = page * 100;
+          const response = await this.fetcher(`https://api.devin.ai/v1/sessions?limit=100&offset=${offset}`, {
+            headers: { Authorization: `Bearer ${this.apiKey}` },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json() as any;
+          const pageRows = Array.isArray(data) ? data : data.sessions;
+          if (!Array.isArray(pageRows)) throw new Error('Invalid sessions response');
+          rows.push(...pageRows);
+          if (pageRows.length < 100) break;
+        }
       }
       const active = new Set<string>();
       for (const row of rows) {
-        const nativeId = String(row.session_id || row.id || '');
+        const rowId = String(row.session_id || row.id || '');
+        const nativeId = this.v3 ? rowId.replace(/^devin-/, '') : rowId;
         if (!nativeId) continue;
         const id = nativeId.startsWith('devin:') ? nativeId.slice(6) : nativeId;
         const urlId = id.replace(/^devin-/, '');
-        const status = mapDevinStatus(row.status_enum || row.status);
+        const status = this.v3
+          ? mapDevinV3Status(row.status, row.status_detail)
+          : mapDevinStatus(row.status_enum || row.status);
         active.add(`devin:${id}`);
-        const updatedAt = String(row.updated_at || row.created_at || new Date().toISOString());
+        const createdAt = this.v3 ? timestampToIso(row.created_at) : row.created_at ? String(row.created_at) : undefined;
+        const updatedAt = this.v3
+          ? timestampToIso(row.updated_at) || createdAt || new Date().toISOString()
+          : String(row.updated_at || row.created_at || new Date().toISOString());
         const cached = this.messagesById.get(id);
         if (cached && cached.updatedAt !== updatedAt) this.messagesById.delete(id);
         const cachedMessages = this.messagesById.get(id);
         const lastMessage = cachedMessages?.messages.filter((item) => item.role !== 'tool').at(-1);
-        const project = typeof row.structured_output?.repo === 'string' ? projectName(row.structured_output.repo) : undefined;
+        const repo = this.v3
+          ? row.structured_output?.repo ?? row.repo ?? row.repository
+          : row.structured_output?.repo;
+        const project = typeof repo === 'string' ? projectName(repo) : undefined;
         const session: AgentSession = {
           id: `devin:${id}`, agent: 'devin', nativeId: id,
           title: String(row.title || row.name || 'Devin session'),
@@ -124,8 +190,11 @@ export class DevinCollector implements Collector {
             ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
             : {}),
           canReply: true,
-          updatedAt, ...(row.created_at ? { startedAt: String(row.created_at) } : {}),
-          url: `https://app.devin.ai/sessions/${encodeURIComponent(urlId)}`, machine: os.hostname(),
+          updatedAt, ...(createdAt ? { startedAt: createdAt } : {}),
+          url: this.v3 && typeof row.url === 'string'
+            ? row.url
+            : `https://app.devin.ai/sessions/${encodeURIComponent(urlId)}`,
+          machine: os.hostname(),
         };
         this.sessions.set(session.id, session);
         this.emit?.(session);

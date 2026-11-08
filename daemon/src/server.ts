@@ -70,6 +70,10 @@ export function createHub(
   const app = Fastify({ logger: false, forceCloseConnections: true });
   const sessions = new Map<string, AgentSession>();
   const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
+  const devinV3 = config.devinPat && config.devinOrgId
+    ? { pat: config.devinPat, orgId: config.devinOrgId }
+    : undefined;
+  const devinApiKey = config.devinApiKey ?? devinV3?.pat;
   const codex = new CodexCollector(config.lookbackDays, approvalHoldMs);
   const claude = new ClaudeCollector({ days: config.lookbackDays, approvalHoldMs });
   const collectors: Collector[] = options.collectors || [
@@ -77,7 +81,7 @@ export function createHub(
     claude,
     new AntigravityCollector(config.lookbackDays),
     new DevinLocalCollector(),
-    ...(config.devinApiKey ? [new DevinCollector(config.devinApiKey)] : []),
+    ...(devinApiKey ? [new DevinCollector(devinApiKey, undefined, devinV3)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];
   const replyRunner = options.replyRunner ?? (config.localReplies?.enabled === false ? undefined : new LocalReplyRunner({

@@ -87,6 +87,29 @@ function devinLocalSession(nativeId: string): AgentSession {
 }
 
 describe('authenticated HTTP API', () => {
+  it('starts Devin v3 listing from PAT and organization credentials without a v1 API key', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      requests.push({ url: String(input), init });
+      return new Response(JSON.stringify({ items: [], end_cursor: null, has_next_page: false, total: 0 }));
+    };
+    vi.stubGlobal('fetch', fetcher);
+    const runtime = createHub({
+      ...config,
+      devinPat: 'fake-pat',
+      devinOrgId: 'org-123',
+    }, { staticDir: '/nonexistent/agent-hub-web' });
+    try {
+      expect(runtime.collectors.some((collector) => collector.name === 'devin')).toBe(true);
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      expect(requests[0]?.url).toBe('https://api.devin.ai/v3/organizations/org-123/sessions?first=100');
+      expect(requests[0]?.init?.headers).toMatchObject({ Authorization: 'Bearer fake-pat' });
+    } finally {
+      await runtime.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('proves hub identity with a nonce and rejects invalid nonces', async () => {
     const runtime = createHub(config, { collectors: [new FakeCollector()], staticDir: '/nonexistent/agent-hub-web' });
     try {

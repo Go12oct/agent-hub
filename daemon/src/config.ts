@@ -9,6 +9,8 @@ export interface HubConfig {
   host: string;
   lookbackDays: number;
   devinApiKey?: string;
+  devinPat?: string;
+  devinOrgId?: string;
   ntfy?: { server?: string; topic: string };
   approvals?: { enabled?: boolean; holdSeconds?: number };
   codexCloud: { enabled: boolean };
@@ -45,6 +47,8 @@ export async function loadConfig(): Promise<HubConfig> {
     await writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   }
   if (process.env.DEVIN_API_KEY) config.devinApiKey = process.env.DEVIN_API_KEY;
+  if (process.env.DEVIN_PAT) config.devinPat = process.env.DEVIN_PAT;
+  if (process.env.DEVIN_ORG_ID) config.devinOrgId = process.env.DEVIN_ORG_ID;
   if (process.env.AGENT_HUB_PORT) config.port = Number(process.env.AGENT_HUB_PORT);
   return config;
 }

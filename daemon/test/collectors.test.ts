@@ -7,7 +7,7 @@ import type { AgentSession } from '@agent-hub/shared';
 import { CodexCollector, parseCodexRecords } from '../src/collectors/codex';
 import { ClaudeCollector, claudeHookOverride, mapClaudeHook, parseClaudeRecords } from '../src/collectors/claude';
 import { AntigravityCollector, parseAntigravityRecords } from '../src/collectors/antigravity';
-import { mapDevinStatus, parseDevinMessages, DevinCollector } from '../src/collectors/devin';
+import { mapDevinStatus, mapDevinV3Status, parseDevinMessages, DevinCollector } from '../src/collectors/devin';
 import { CodexCloudCollector } from '../src/collectors/codex-cloud';
 import { WatchedCollector, type ParsedWatchedSession } from '../src/collectors/watched';
 import type { EmitSession } from '../src/collectors/types';
@@ -867,6 +867,24 @@ describe('Devin API mapping', () => {
     expect(mapDevinStatus('error')).toBe('error');
   });
 
+  it.each([
+    ['running', 'waiting_for_user', 'needs_input'],
+    ['running', 'waiting_for_approval', 'needs_input'],
+    ['running', 'finished', 'done'],
+    ['running', 'working', 'working'],
+    ['running', null, 'working'],
+    ['running', 'other', 'working'],
+    ['new', null, 'working'],
+    ['claimed', null, 'working'],
+    ['resuming', null, 'working'],
+    ['exit', null, 'done'],
+    ['error', null, 'error'],
+    ['suspended', null, 'idle'],
+    ['unknown', null, 'idle'],
+  ] as const)('maps v3 status %s with detail %s to %s', (status, detail, expected) => {
+    expect(mapDevinV3Status(status, detail)).toBe(expected);
+  });
+
   it('polls with a personal API key and emits mapped sessions', async () => {
     const fetcher: typeof fetch = async () => new Response(JSON.stringify({ sessions: [{ session_id: 'abc', status_enum: 'blocked', title: 'Triage', structured_output: { repo: 'org/repository' } }] }));
     const collector = new DevinCollector('not-a-real-key', fetcher);
@@ -876,6 +894,65 @@ describe('Devin API mapping', () => {
     collector.stop();
     expect(emitted[0]).toMatchObject({ id: 'devin:abc', status: 'working', project: 'repository', url: 'https://app.devin.ai/sessions/abc' });
     expect(emitted[0].lastMessage).toBeUndefined();
+  });
+
+  it('paginates Devin v3 sessions using the PAT and normalizes session data', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, init });
+      const items = new URL(url).searchParams.has('after')
+        ? [{
+          session_id: 'devin-def456',
+          title: 'Second session',
+          status: 'running',
+          status_detail: 'working',
+          created_at: 1_730_000_100,
+          updated_at: 1_730_000_110,
+        }]
+        : [{
+          session_id: 'devin-abc123',
+          title: 'Waiting session',
+          status: 'running',
+          status_detail: 'waiting_for_user',
+          url: 'https://app.devin.ai/sessions/abc123?source=v3',
+          structured_output: { repo: 'org/project' },
+          created_at: 1_730_000_000,
+          updated_at: 1_730_000_010,
+        }];
+      return new Response(JSON.stringify({
+        items,
+        end_cursor: new URL(url).searchParams.has('after') ? null : 'cursor-1',
+        has_next_page: !new URL(url).searchParams.has('after'),
+        total: 2,
+      }));
+    };
+    const collector = new DevinCollector('fallback-api-key', fetcher, { pat: 'fake-pat', orgId: 'org-123' });
+    const emitted: AgentSession[] = [];
+    collector.start((session) => emitted.push(session));
+    try {
+      await vi.waitFor(() => expect(emitted).toHaveLength(2));
+      expect(requests.map((request) => request.url)).toEqual([
+        'https://api.devin.ai/v3/organizations/org-123/sessions?first=100',
+        'https://api.devin.ai/v3/organizations/org-123/sessions?first=100&after=cursor-1',
+      ]);
+      expect(requests).toHaveLength(2);
+      expect(requests[0]?.init?.headers).toMatchObject({ Authorization: 'Bearer fake-pat' });
+      expect(requests[1]?.init?.headers).toMatchObject({ Authorization: 'Bearer fake-pat' });
+      expect(emitted).toContainEqual(expect.objectContaining({
+        id: 'devin:abc123',
+        nativeId: 'abc123',
+        status: 'needs_input',
+        project: 'project',
+        startedAt: new Date(1_730_000_000_000).toISOString(),
+        updatedAt: new Date(1_730_000_010_000).toISOString(),
+        url: 'https://app.devin.ai/sessions/abc123?source=v3',
+      }));
+      expect(emitted).toContainEqual(expect.objectContaining({ id: 'devin:def456', status: 'working' }));
+      expect(emitted[0]?.lastMessage).toBeUndefined();
+    } finally {
+      collector.stop();
+    }
   });
 
   it('fetches all session pages up to 101 rows', async () => {

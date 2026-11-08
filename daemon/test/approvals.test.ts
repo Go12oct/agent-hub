@@ -172,6 +172,38 @@ describe('ntfy notifications', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
+  it('publishes a Devin needs-you transition once and clears it when working resumes', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
+    const sessionId = 'devin:waiting-session';
+    const waiting = session({
+      id: sessionId,
+      agent: 'devin',
+      nativeId: 'waiting-session',
+      title: 'Devin session',
+      project: 'repo',
+      status: 'needs_input',
+      updatedAt: new Date().toISOString(),
+      lastMessage: 'Waiting for your reply.',
+    });
+    expect(ntfyMessage(waiting).title).toBe('Devin needs you — repo');
+
+    await notifier.update({ ...waiting, status: 'working' });
+    await notifier.update(waiting);
+    await notifier.update(waiting);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [publishUrl, publishInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const sequenceId = sessionNotificationSequence(sessionId);
+    expect(publishUrl).toBe('https://ntfy.sh/t');
+    expect(publishInit.headers).toMatchObject({ 'X-Sequence-ID': sequenceId });
+
+    await notifier.update({ ...waiting, status: 'working', updatedAt: new Date().toISOString() });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [clearUrl, clearInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(clearUrl).toBe(`https://ntfy.sh/t/${sequenceId}/clear`);
+    expect(clearInit.method).toBe('PUT');
+  });
+
   it('uses sequence ids and clears disappeared approvals and needs-you alerts without throttling', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const notifier = new NtfyNotifier({ topic: 't' }, fetchImpl as unknown as typeof fetch);
