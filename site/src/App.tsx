@@ -2,6 +2,7 @@ import { MotionConfig, motion } from 'motion/react'
 import { ChevronDown, Download, Smartphone } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { LiveDemo } from './demo/LiveDemo'
+import { Background } from './Background'
 import { ease } from './demo/ui'
 
 const REPO = 'https://github.com/Go12oct/agent-hub'
@@ -53,7 +54,8 @@ function Faq({ q, a }: { q: string; a: string }) {
 export default function App() {
   return (
     <MotionConfig reducedMotion="user">
-      <div className="mx-auto max-w-[1120px] px-5 sm:px-8">
+      <Background />
+      <div className="relative mx-auto max-w-[1120px] px-5 sm:px-8">
         <nav className="flex h-16 items-center justify-between border-b border-line">
           <a href="/" className="flex items-center gap-2.5 font-semibold"><img src="/favicon.svg" alt="" className="size-7" />Agent Hub</a>
           <div className="flex items-center gap-6 text-[14px] text-text-2">
@@ -66,9 +68,9 @@ export default function App() {
 
         <header className="pt-16 text-center sm:pt-24">
           <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, ease }}>
-            <p className="font-mono text-[12px] text-accent">Free · Local · No app store</p>
+            <p className="font-mono text-[12px] text-accent">Keep your IDE · Keep your agents · Add your phone</p>
             <h1 className="mx-auto mt-5 max-w-[760px] text-[44px] font-semibold leading-[1.04] tracking-[-0.035em] sm:text-[68px]">Your coding agents, on your phone.</h1>
-            <p className="mx-auto mt-6 max-w-[580px] text-[17px] leading-relaxed text-text-2 sm:text-[18px]">Agent Hub runs on your Windows PC and puts every Claude Code, Codex, Devin and Antigravity chat on your Android phone. Approve requests, reply, and get an alert when an agent needs you.</p>
+            <p className="mx-auto mt-6 max-w-[580px] text-[17px] leading-relaxed text-text-2 sm:text-[18px]">No new IDE to move into. Agent Hub runs quietly next to the tools you already use and puts every Claude Code, Codex, Devin and Antigravity chat on your Android phone. Approve requests, reply, and get an alert when an agent needs you.</p>
             <div className="mt-9 flex flex-wrap justify-center gap-3">
               <a className="btn btn-primary" href={WIN}><Download size={17} />Download for Windows</a>
               <a className="btn btn-secondary" href={APK}><Smartphone size={17} />Android app</a>
@@ -79,6 +81,27 @@ export default function App() {
 
         <section id="demo" className="scroll-mt-8 pb-24 pt-16 sm:pt-20">
           <LiveDemo />
+        </section>
+
+        <section className="border-t border-line py-24">
+          <Reveal>
+            <h2 className="max-w-[680px] text-[32px] font-semibold leading-tight tracking-[-0.025em] sm:text-[40px]">Not another IDE.</h2>
+            <p className="mt-4 max-w-[640px] text-[16px] leading-relaxed text-text-2">Tools like T3 Code ask you to move your work into their app. Agent Hub doesn't. Keep VS Code, Cursor, Windsurf, Antigravity or the terminal, keep each agent's own CLI and settings, and add your phone on top.</p>
+          </Reveal>
+          <div className="mt-10 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-line bg-card/80 p-6">
+              <p className="font-mono text-[12px] text-muted">A new agent IDE</p>
+              <ul className="mt-4 grid gap-2.5 text-[15px] text-text-2">
+                <li>Move your projects and habits into one app</li><li>Its own chat window for each agent</li><li>Desk only</li>
+              </ul>
+            </div>
+            <div className="rounded-2xl border border-accent/40 bg-card/80 p-6">
+              <p className="font-mono text-[12px] text-accent">Agent Hub</p>
+              <ul className="mt-4 grid gap-2.5 text-[15px]">
+                <li>Your IDE, your agents, your settings, untouched</li><li>Reads the chats where they already live</li><li>Follows you to your phone, at home or away</li>
+              </ul>
+            </div>
+          </div>
         </section>
 
         <section className="border-t border-line py-24">
