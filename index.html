@@ -2,84 +2,157 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Hub: one live feed for your coding agents</title>
-<meta name="description" content="Agent Hub runs locally on your Windows PC and gives you one live feed of Codex, Claude Code, Antigravity and Devin sessions on your phone and browser.">
-<meta property="og:title" content="Agent Hub">
-<meta property="og:description" content="One live feed for coding-agent sessions on your PC, Android phone, and browser.">
-<meta name="theme-color" content="#0b0d12">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%236d5efc'/><circle cx='34' cy='50' r='9' fill='white'/><circle cx='66' cy='34' r='9' fill='white'/><circle cx='66' cy='66' r='9' fill='white'/></svg>">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Hub: your coding agents, on your phone</title>
+<meta name="description" content="Agent Hub runs on your Windows PC and puts your Claude Code, Codex, Devin and Antigravity chats on your Android phone. Approve, reply and get alerts. Free, local, no app store.">
+<meta property="og:title" content="Agent Hub: your coding agents, on your phone">
+<meta property="og:description" content="Approve, reply and get alerts for Claude Code, Codex, Devin and Antigravity from your phone. Free and local.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231a1e28'/><text x='16' y='21' font-family='monospace' font-size='13' fill='%23eef0f5' text-anchor='middle'>AH</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0b0d12;--card:#141821;--line:#232937;--text:#e8ebf2;--muted:#9aa3b5;--accent:#6d5efc;--accent2:#22c3a6}
+:root{--bg:#0b0d14;--card:#11141c;--raised:#1a1e28;--raised2:#232835;--line:rgba(238,240,245,.08);--line2:rgba(238,240,245,.14);--text:#eef0f5;--text2:#a3a9b8;--muted:#7a8296;--accent:#e5a84b;--on:#1a1200;--work:#4cc38a;--devin:#5b9cff;--codex:#a58cff;--claude:#ff7a9a;--agy:#3cc8e0;--font:'Geist',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;--mono:'Geist Mono',ui-monospace,Consolas,monospace}
 *{box-sizing:border-box}html,body{margin:0}
-body{background:radial-gradient(1200px 600px at 50% -200px,#1d1b4a 0,transparent 70%),var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow-x:hidden}
-.wrap{max-width:960px;margin:0 auto;padding:0 20px}
-nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0}
-.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:var(--text);text-decoration:none}
-.logo i{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent2))}
-nav a.gh{color:var(--muted);text-decoration:none;font-size:15px}
-header{padding:56px 0 40px;text-align:center}
-h1{font-size:clamp(34px,7vw,60px);line-height:1.08;margin:0 0 18px;letter-spacing:-.02em}
-h1 span{background:linear-gradient(90deg,#a99dff,var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
-.lead{color:var(--muted);font-size:clamp(17px,2.6vw,20px);max-width:640px;margin:0 auto 30px}
-.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
-.btn{display:inline-block;padding:13px 22px;border-radius:12px;font-weight:600;text-decoration:none;border:1px solid var(--line);color:var(--text);background:var(--card)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.feed{max-width:520px;margin:48px auto 0;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:8px;text-align:left}
-.row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px}
-.row+.row{border-top:1px solid var(--line)}
-.dot{width:10px;height:10px;border-radius:50%;flex:none}
-.row b{font-weight:600;font-size:15px;display:block}.row small{color:var(--muted);font-size:13px}
-.tag{margin-left:auto;font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
-section{padding:56px 0}
-h2{font-size:clamp(24px,4vw,32px);margin:0 0 22px;letter-spacing:-.01em}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px}
-.card h3{margin:0 0 6px;font-size:17px}.card p{margin:0;color:var(--muted);font-size:15px}
-ol{padding-left:22px;color:var(--muted)}ol li{margin:8px 0}ol b{color:var(--text)}
-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;background:#0f1218;border:1px solid var(--line);padding:2px 6px;border-radius:6px;color:#cfd6ff;word-break:break-word}
-pre{background:#0f1218;border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow-x:auto;font-size:14px;color:#cfd6ff;margin:14px 0 0}
-footer{border-top:1px solid var(--line);padding:28px 0 40px;color:var(--muted);font-size:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
-footer a{color:var(--muted)}
+body{background:var(--bg);color:var(--text);font:16px/1.6 var(--font);-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+nav{display:flex;align-items:center;justify-content:space-between;height:68px;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;text-decoration:none}
+.mark{display:grid;place-items:center;width:30px;height:30px;border:1px solid var(--line2);border-radius:8px;background:var(--raised);font:500 11px var(--mono)}
+nav .links{display:flex;gap:22px;font-size:14px;color:var(--text2)}nav .links a{text-decoration:none}nav .links a:hover{color:var(--text)}
+.hero>*{min-width:0}.hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:56px;align-items:center;padding:72px 0 64px}
+.eyebrow{font:500 12px var(--mono);color:var(--accent);letter-spacing:.06em;text-transform:uppercase;margin:0 0 18px}
+h1{font-size:clamp(38px,5.6vw,60px);line-height:1.04;letter-spacing:-.035em;margin:0 0 20px;font-weight:600}
+.lead{font-size:18px;color:var(--text2);margin:0 0 30px;max-width:520px}
+.cta{display:flex;gap:10px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;height:46px;padding:0 18px;border-radius:10px;border:1px solid var(--line2);background:var(--raised);font-weight:600;font-size:15px;text-decoration:none}
+.btn:hover{background:var(--raised2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on)}.btn.primary:hover{filter:brightness(1.06)}
+.btn small{font:400 12px var(--mono);opacity:.7}
+.note{margin:16px 0 0;font-size:13px;color:var(--muted)}
+.phone{justify-self:center;width:330px;max-width:100%;border:1px solid var(--line2);border-radius:34px;background:#07080d;padding:14px;box-shadow:0 30px 80px rgba(0,0,0,.45)}
+.screen{border-radius:24px;background:var(--bg);padding:18px 14px 16px;min-height:560px}
+.sbar{display:flex;justify-content:space-between;font:500 11px var(--mono);color:var(--muted);padding:0 4px 14px}
+.live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text2);margin:0 4px 12px}.live i{width:7px;height:7px;border-radius:50%;background:var(--work)}
+.htitle{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0 4px 14px}.htitle span{color:var(--accent)}
+.deck{position:relative;height:208px;margin-bottom:18px}
+.dcard{position:absolute;inset:0;border:1px solid var(--line2);border-radius:16px;background:var(--card);padding:14px}
+.dcard.b1{transform:translateY(12px) scale(.94);opacity:.55}.dcard.b2{transform:translateY(6px) scale(.97);opacity:.8}
+.who{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2)}.who b{color:var(--claude);font-weight:600}
+.st{margin-left:auto;font-size:11px;color:var(--accent);font-weight:600}
+.dcard h4{margin:10px 0 6px;font-size:15px;font-weight:600}
+.cmd{font:12px/1.5 var(--mono);background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acts{display:flex;gap:8px;margin-top:12px}.acts span{flex:1;text-align:center;height:38px;line-height:38px;border-radius:9px;font-size:14px;font-weight:600;border:1px solid var(--line2);background:var(--raised)}.acts span.ok{background:var(--accent);border-color:var(--accent);color:var(--on)}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tile{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:10px}
+.tile b{display:block;font-size:13px;font-weight:600}.tile small{display:block;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .bar{height:3px;border-radius:2px;background:var(--raised2);margin-top:9px;overflow:hidden}.tile .bar i{display:block;height:100%;width:60%;background:var(--work)}
+.tile.wait .bar i{background:var(--accent);width:100%}
+section{padding:64px 0;border-top:1px solid var(--line)}
+h2{font-size:clamp(26px,3.6vw,34px);letter-spacing:-.025em;margin:0 0 10px;font-weight:600}
+.sub{color:var(--text2);margin:0 0 34px;max-width:620px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.feat{background:var(--bg);padding:24px}
+.feat .k{font:500 12px var(--mono);color:var(--muted);margin-bottom:10px}
+.feat h3{margin:0 0 6px;font-size:17px;font-weight:600}.feat p{margin:0;color:var(--text2);font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--line)}th{font:500 12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+td:first-child{font-weight:600}td .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:9px}
+td.y{color:var(--text)}td.p{color:var(--text2)}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0;display:grid;gap:12px}
+.steps li{counter-increment:s;display:grid;grid-template-columns:40px 1fr;gap:14px;align-items:start;border:1px solid var(--line);border-radius:14px;background:var(--card);padding:18px}
+.steps li:before{content:counter(s);display:grid;place-items:center;width:32px;height:32px;border-radius:8px;background:var(--raised);border:1px solid var(--line2);font:500 13px var(--mono)}
+.steps b{display:block;margin-bottom:2px}.steps span{color:var(--text2);font-size:15px}
+code{font:13px var(--mono);background:var(--raised);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--text)}
+.faq{display:grid;grid-template-columns:1fr 1fr;gap:28px 40px}.faq h3{margin:0 0 6px;font-size:16px;font-weight:600}.faq p{margin:0;color:var(--text2);font-size:15px}
+footer{border-top:1px solid var(--line);padding:30px 0 44px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:14px;color:var(--muted)}footer a{text-decoration:none}footer a:hover{color:var(--text)}
+@media (max-width:860px){.hero{grid-template-columns:minmax(0,1fr);gap:44px;padding-top:48px}.grid{grid-template-columns:1fr}.faq{grid-template-columns:1fr}nav .links a.hide{display:none}.tbl{overflow-x:auto}}
 </style>
 </head>
 <body>
 <div class="wrap">
-<nav><a class="logo" href="/"><i></i>Agent Hub</a><a class="gh" href="https://github.com/Go12oct/agent-hub">GitHub &rarr;</a></nav>
-<header>
-<h1>One live feed for<br><span>all your coding agents</span></h1>
-<p class="lead">Agent Hub runs locally on your Windows PC and shows your Codex, Claude Code, Antigravity and Devin sessions in one place: on your Android phone, or in any browser.</p>
-<div class="cta"><a class="btn primary" href="https://github.com/Go12oct/agent-hub#windows-quick-start">Get started</a><a class="btn" href="https://github.com/Go12oct/agent-hub">View source</a></div>
-<div class="feed" aria-hidden="true">
-<div class="row"><span class="dot" style="background:#f5a524"></span><div><b>Refactor auth middleware</b><small>Claude Code &middot; 2m ago</small></div><span class="tag">Needs you</span></div>
-<div class="row"><span class="dot" style="background:#22c3a6"></span><div><b>Fix flaky upload test</b><small>Codex CLI &middot; running</small></div><span class="tag">Working</span></div>
-<div class="row"><span class="dot" style="background:#6d5efc"></span><div><b>Add Stripe webhooks</b><small>Devin &middot; 14m ago</small></div><span class="tag">Done</span></div>
-</div>
-</header>
+<nav><a class="brand" href="/"><span class="mark">AH</span>Agent Hub</a><div class="links"><a class="hide" href="#features">Features</a><a class="hide" href="#install">Install</a><a href="https://github.com/Go12oct/agent-hub">GitHub</a></div></nav>
 
-<section>
-<h2>Why Agent Hub</h2>
+<div class="hero">
+<div>
+<p class="eyebrow">Free &middot; Local &middot; No app store</p>
+<h1>Your coding agents, on your phone.</h1>
+<p class="lead">Agent Hub runs on your Windows PC and puts every Claude Code, Codex, Devin and Antigravity chat on your Android phone. Approve requests, reply, and get an alert when an agent needs you.</p>
+<div class="cta">
+<a class="btn primary" href="https://github.com/Go12oct/agent-hub/releases/latest/download/agent-hub-windows.zip">Download for Windows <small>.zip</small></a>
+<a class="btn" href="https://github.com/Go12oct/agent-hub/releases/latest/download/agent-hub-android.apk">Android app <small>.apk</small></a>
+</div>
+<p class="note">Open source, MIT licensed. Your chats stay on your PC.</p>
+</div>
+<div class="phone" aria-hidden="true"><div class="screen">
+<div class="sbar"><span>9:41</span><span>agent hub</span></div>
+<div class="live"><i></i>Live from your PC</div>
+<p class="htitle"><span>1</span> needs you</p>
+<div class="deck">
+<div class="dcard b1"></div><div class="dcard b2"></div>
+<div class="dcard">
+<div class="who"><b>Claude Code</b>&middot; api-server<span class="st">Needs you</span></div>
+<h4>Run a command?</h4>
+<div class="cmd">npm run migrate -- --env staging</div>
+<div class="acts"><span>Deny</span><span class="ok">Allow</span></div>
+</div>
+</div>
+<div class="tiles">
+<div class="tile"><b style="color:var(--codex)">Codex</b><small>Fix flaky upload test</small><div class="bar"><i></i></div></div>
+<div class="tile wait"><b style="color:var(--devin)">Devin</b><small>Waiting on you</small><div class="bar"><i></i></div></div>
+<div class="tile"><b style="color:var(--agy)">Antigravity</b><small>Refactor billing</small><div class="bar"><i style="width:35%"></i></div></div>
+<div class="tile"><b style="color:var(--claude)">Claude Code</b><small>Add webhooks</small><div class="bar"><i style="width:80%"></i></div></div>
+</div>
+</div></div>
+</div>
+
+<section id="features">
+<h2>Leave the desk. Keep the agents moving.</h2>
+<p class="sub">A small background app on your PC reads your agents' local chats and serves them to your phone over Wi-Fi or Tailscale. Nothing goes through a hosted service.</p>
 <div class="grid">
-<div class="card"><h3>Local first</h3><p>A small daemon on your PC reads agent transcripts directly. Nothing is uploaded to a hosted service.</p></div>
-<div class="card"><h3>Phone-ready</h3><p>Pair the Android app with a QR code and follow every session over your LAN or Tailscale.</p></div>
-<div class="card"><h3>Many agents</h3><p>Codex CLI and desktop, Claude Code with hooks, Antigravity, and Devin through its API.</p></div>
-<div class="card"><h3>Push alerts</h3><p>Optional ntfy notifications when a session needs input, finishes, or errors.</p></div>
+<div class="feat"><div class="k">01</div><h3>Approve from your phone</h3><p>Claude Code and Codex permission requests show up as cards. Allow or Deny, and the agent carries on.</p></div>
+<div class="feat"><div class="k">02</div><h3>Reply to any chat</h3><p>Send the next message to Claude Code, Codex, Devin Local and Antigravity CLI chats right from the phone.</p></div>
+<div class="feat"><div class="k">03</div><h3>Alerts that matter</h3><p>Get a notification when an agent needs you, finishes, or fails, via the free ntfy app.</p></div>
+<div class="feat"><div class="k">04</div><h3>Devin, cloud and local</h3><p>See Devin sessions, the cards they're waiting on, and jump straight into Devin to answer.</p></div>
+<div class="feat"><div class="k">05</div><h3>Works away from home</h3><p>Install Tailscale on both devices and your agents follow you over mobile data.</p></div>
+<div class="feat"><div class="k">06</div><h3>Yours, for free</h3><p>No account, no subscription, no store. Download, install, scan a QR code.</p></div>
 </div>
 </section>
 
 <section>
-<h2>Quick start (Windows)</h2>
-<ol>
-<li><b>Install Node.js 22+</b> (LTS).</li>
-<li><b>Download</b> <code>agent-hub-windows.zip</code> from the releases, extract it, and run the installer:
-<pre>Set-ExecutionPolicy -Scope Process Bypass
-.\agent-hub\scripts\install.ps1</pre></li>
-<li><b>Scan the QR code</b> it prints with the Agent Hub Android app, or open <code>http://localhost:4747</code> in your browser.</li>
-<li><b>Optional:</b> <code>agent-hub config set devinApiKey apk_user_...</code> and <code>agent-hub config set ntfy.topic &lt;topic&gt;</code></li>
+<h2>What works with each agent</h2>
+<p class="sub">Agent Hub only uses each agent's official hooks, CLIs and APIs.</p>
+<div class="tbl"><table>
+<tr><th>Agent</th><th>Live feed</th><th>Reply</th><th>Approvals</th></tr>
+<tr><td><span class="dot" style="background:var(--claude)"></span>Claude Code</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Allow / Deny on the phone</td></tr>
+<tr><td><span class="dot" style="background:var(--codex)"></span>Codex</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Allow / Deny via Codex hooks</td></tr>
+<tr><td><span class="dot" style="background:var(--devin)"></span>Devin</td><td class="y">Cloud and local</td><td class="y">Devin Local chats</td><td class="p">Shown on the phone, answered in Devin</td></tr>
+<tr><td><span class="dot" style="background:var(--agy)"></span>Antigravity</td><td class="y">Yes</td><td class="p">CLI chats</td><td class="p">Not available</td></tr>
+</table></div>
+</section>
+
+<section id="install">
+<h2>Set up in two minutes</h2>
+<p class="sub">Windows 10 or 11 and an Android phone. Nothing else to install.</p>
+<ol class="steps">
+<li><div><b>Install on your PC</b><span>Download <a href="https://github.com/Go12oct/agent-hub/releases/latest/download/agent-hub-windows.zip">agent-hub-windows.zip</a>, unzip it and double-click <code>Install-AgentHub.cmd</code>. It starts with Windows and adds a tray icon. No admin rights needed.</span></div></li>
+<li><div><b>Install the phone app</b><span>Download <a href="https://github.com/Go12oct/agent-hub/releases/latest/download/agent-hub-android.apk">agent-hub-android.apk</a> on your phone and open it. Android will ask you to allow installs from your browser.</span></div></li>
+<li><div><b>Pair</b><span>Right-click the tray icon, choose <b style="display:inline">Pair phone</b>, and scan the QR code with the app.</span></div></li>
+<li><div><b>Optional: alerts and remote access</b><span>Add a private ntfy topic for notifications, and Tailscale to reach your PC away from home. See the <a href="https://github.com/Go12oct/agent-hub#readme">README</a>.</span></div></li>
 </ol>
 </section>
 
-<footer><span>Agent Hub &middot; MIT licensed</span><span><a href="https://github.com/Go12oct/agent-hub">GitHub</a> &middot; <a href="https://github.com/Go12oct/agent-hub/releases">Releases</a></span></footer>
+<section>
+<h2>Questions</h2>
+<div class="faq">
+<div><h3>Is my code uploaded anywhere?</h3><p>No. Agent Hub reads chats on your PC and sends them straight to your paired phone. Notifications carry only a one-line summary.</p></div>
+<div><h3>Why not the Play Store?</h3><p>To keep it free. The APK is signed and updates install over the previous version.</p></div>
+<div><h3>Mac, Linux or iPhone?</h3><p>Not yet. Agent Hub is built for Windows and Android today.</p></div>
+<div><h3>Can it approve Devin's cards?</h3><p>Devin has no public API for that, so the phone shows the card and opens it in Devin with one tap.</p></div>
+</div>
+</section>
+
+<footer><span>Agent Hub &middot; MIT licensed</span><span><a href="https://github.com/Go12oct/agent-hub">GitHub</a> &nbsp;&middot;&nbsp; <a href="https://github.com/Go12oct/agent-hub/releases">Releases</a></span></footer>
 </div>
 </body>
 </html>
