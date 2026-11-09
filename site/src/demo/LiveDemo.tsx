@@ -4,6 +4,7 @@ import { useDemo, type Scenario } from './engine'
 import { Pc } from './Pc'
 import { Phone } from './Phone'
 import { ease } from './ui'
+import { pulseBackground } from '../Background'
 
 const scenarios: Array<{ id: Scenario; label: string; caption: string }> = [
   { id: 'approve', label: 'Approve', caption: 'Claude Code wants to run a migration. Swipe the card right to allow it, left to deny, or let it play.' },
@@ -42,6 +43,8 @@ export function LiveDemo() {
   const next = useCallback(() => setIndex((i) => (i + 1) % scenarios.length), [])
   const scenario = scenarios[index]
   const demo = useDemo(scenario.id, run, inView && pageVisible, next)
+  const phoneRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (demo.state.pulse > 0) pulseBackground(phoneRef.current) }, [demo.state.pulse])
 
   return (
     <div ref={stageRef}>
@@ -92,7 +95,7 @@ export function LiveDemo() {
             <span className="absolute right-0 top-1/2 h-[3px] w-10 -translate-y-1/2 rounded-full bg-accent" />
           </motion.div>
         </div>
-        <div className="order-1 lg:order-3">
+        <div ref={phoneRef} className="order-1 lg:order-3">
           <p className="mb-2 text-center font-mono text-[11px] text-muted lg:text-left">Your phone</p>
           <Phone {...demo} />
         </div>
