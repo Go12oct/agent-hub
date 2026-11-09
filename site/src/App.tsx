@@ -34,11 +34,10 @@ function SectionHead({ title, body }: { title: string; body?: ReactNode }) {
 const tools = ['VS Code', 'Cursor', 'Windsurf', 'Antigravity', 'JetBrains', 'Windows Terminal']
 
 const beats: Beat[] = [
-  { time: '09:40', title: 'Start the job where you always do', body: 'Kick off Claude Code in Cursor or the terminal and walk away. Your phone shows every chat running on the PC, grouped by agent.', shot: '/shots/home-working.webp', alt: 'Agent Hub home screen with four agents working' },
-  { time: '09:52', title: 'Claude stops to ask. Your phone buzzes', body: 'The exact command arrives as a card with an alert. Swipe right to allow, left to deny, and Claude carries on at your desk.', shot: '/shots/home-approval.webp', alt: 'Claude Code asking to run npm run db:migrate, with Allow and Deny' },
-  { time: '10:15', title: 'Codex finished and has a question', body: 'Type the answer on your phone. It goes into the same chat on your PC, exactly as if you had typed it there.', shot: '/shots/chat-reply.webp', alt: 'Codex chat with a question and a reply being typed' },
-  { time: '11:30', title: 'Devin is waiting on a card', body: "You see what Devin wants and open the card in Devin with one tap. Devin's API can't answer cards, so Agent Hub doesn't pretend to.", shot: '/shots/devin-card.webp', alt: 'Devin card asking to update an automation, with Open in Devin' },
-  { time: '13:05', title: 'Across town, on mobile data', body: 'With Tailscale on both devices, the phone reaches your PC from anywhere. No ports opened to the internet, no account to sign up for.', shot: '/shots/home-away.webp', alt: 'Agent Hub home screen connected over Tailscale' },
+  { time: '09:40', title: 'Start the job where you always do', body: 'Kick off Claude Code in Cursor or the terminal and walk away. Your phone shows every chat running on the PC, grouped by agent.', shot: '/shots/home-working.webp', alt: 'Agent Hub home screen: all clear, Claude Code and Antigravity working' },
+  { time: '09:52', title: 'Claude stops to ask. Your phone buzzes', body: 'The exact command arrives as a card with an alert. Swipe right to allow, left to deny, and Claude carries on at your desk.', shot: '/shots/home-approval.webp', alt: 'Claude Code asking to run npm run db:migrate -- --env staging, with Allow and Deny' },
+  { time: '10:15', title: 'Codex finished and has a question', body: 'The whole chat is on your phone and updates live, so you know exactly what it is asking before you answer.', shot: '/shots/chat-reply.webp', alt: 'Codex chat asking whether to delete the uploadLegacy helper' },
+  { time: '11:30', title: 'Across town, on mobile data', body: 'With Tailscale on both devices, the phone reaches your PC from anywhere. No ports opened to the internet, no Agent Hub account.', shot: '/shots/settings.webp', alt: 'Agent Hub connection sheet: connected, with Tailscale instructions' },
 ]
 
 const agents = [
@@ -124,7 +123,7 @@ export default function App() {
         </section>
 
         <section id="story" className="scroll-mt-8 border-t border-line pt-24">
-          <SectionHead title="One morning away from the desk" body="This is the real app, on a real phone, following four agents through a morning." />
+          <SectionHead title="One morning away from the desk" body="Real screens from the Android app, following a morning of agent work." />
           <div className="mt-6 lg:-mt-6"><Story beats={beats} /></div>
         </section>
 
