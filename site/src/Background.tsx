@@ -25,9 +25,9 @@ export function Background() {
         for (let x = gap / 2; x < w; x += gap) {
           const d1 = Math.hypot(x - cx1, y - cy1), d2 = Math.hypot(x - cx2, y - cy2)
           const wave = Math.max(0, Math.sin(d1 / 46 - s * 1.1)) * Math.exp(-d1 / 520) + Math.max(0, Math.sin(d2 / 52 - s * 0.9)) * Math.exp(-d2 / 460)
-          const a = 0.05 + wave * 0.32
+          const a = 0.08 + wave * 0.5
           ctx.fillStyle = wave > 0.55 ? `rgba(229,168,75,${a})` : `rgba(238,240,245,${a * 0.7})`
-          ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5)
+          ctx.fillRect(x - 1, y - 1, 2, 2)
         }
       }
     }
@@ -48,7 +48,7 @@ export function Background() {
   return (
     <div aria-hidden className="pointer-events-none fixed inset-0 -z-10">
       <canvas ref={ref} className="absolute inset-0" />
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,transparent_0%,var(--color-bg)_75%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,transparent_30%,var(--color-bg)_95%)]" />
     </div>
   )
 }
