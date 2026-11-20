@@ -83,3 +83,12 @@ It exposes only the paired app's API, not the daemon's static web server,
 hook endpoints, or shutdown endpoint. Keep the PC online for remote access.
 The service caps simultaneous tunnels and requests and rate-limits clients;
 an Always Free VM is intended for small deployments, not unlimited traffic.
+
+For a private relay serving known PCs, set `RELAY_ALLOWED_HUB_IDS` in a
+systemd drop-in (`sudo systemctl edit agent-hub-relay`) and restart the service.
+Add `[Service]`, then `Environment=RELAY_ALLOWED_HUB_IDS=<id>,<id>` with each
+PC's lowercase SHA-256 hash of its `relay-key` file (next to `config.json`).
+Share only the hash, not the file or pairing QR. This permits only those
+PCs to register while leaving phone pairing and sign-in unchanged. Without
+an allowlist, open enrollment caps each source IPv4 address or IPv6 /64 to eight simultaneous
+registrations but does not prevent distributed clients from consuming capacity.

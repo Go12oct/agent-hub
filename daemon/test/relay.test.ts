@@ -2,11 +2,44 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
 import type { AgentSession } from '@agent-hub/shared';
+import { digest } from '../../relay/src/protocol';
 import { createRelay } from '../../relay/src/server';
 import type { EmitSession } from '../src/collectors/types';
 import { connectRelay, relayBaseUrl } from '../src/relay';
 import { createHub } from '../src/server';
+
+it('admits only configured hubs or enforces concurrent registrations per source', async () => {
+  const approved = randomBytes(32).toString('hex');
+  for (const allowedHubIds of [undefined, new Set([digest(approved)])]) {
+    const relay = createRelay({ allowedHubIds, maxHubs: 2, trustProxy: true });
+    try {
+      relay.server.listen(0, '127.0.0.1');
+      await once(relay.server, 'listening');
+      const { port } = relay.server.address() as AddressInfo;
+      const connect = (key: string, address: string) => new WebSocket(`ws://127.0.0.1:${port}/connect`, { headers: {
+        Authorization: `Bearer ${key}`,
+        'X-Agent-Hub-Token-Hash': digest('test'),
+        'X-Agent-Hub-Client-IP': address,
+      } });
+
+      const first = connect(approved, '2001:db8::1');
+      await once(first, 'open');
+      const otherKey = randomBytes(32).toString('hex');
+      const duplicateSource = connect(otherKey, '2001:db8::2');
+      const [error] = await once(duplicateSource, 'error');
+      expect(error.message).toContain(allowedHubIds ? '403' : '429');
+      if (!allowedHubIds) {
+        const other = connect(otherKey, '2001:db8:0:1::1');
+        await once(other, 'open');
+        first.close();
+        await once(first, 'close');
+        await once(connect(approved, '2001:db8::3'), 'open');
+      }
+    } finally { await relay.close(); }
+  }
+});
 
 it('relays authenticated phone requests and live events and reconnects after a restart', async () => {
   let emit: EmitSession | undefined;

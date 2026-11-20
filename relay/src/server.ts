@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   digest, hexKey, hubRoute, maxBody, maxBuffered, maxChunk, maxFrame, maxRequests, registrationPath, routePrefix,
@@ -20,12 +21,30 @@ function fail(response: ServerResponse, status: number) {
   else response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: status === 503 ? 'PC is offline' : 'Relay request failed' }));
 }
 
-export function createRelay({ trustProxy = false, maxHubs = 128 }: { trustProxy?: boolean; maxHubs?: number } = {}) {
+function addressGroup(address: string): string {
+  if (isIP(address) !== 6) return address;
+  const normalized = new URL(`http://[${address.split('%')[0]}]`).hostname.slice(1, -1);
+  const [left = '', right] = normalized.split('::');
+  const groups = left ? left.split(':') : [];
+  if (right !== undefined) {
+    const end = right ? right.split(':') : [];
+    groups.push(...Array<string>(8 - groups.length - end.length).fill('0'), ...end);
+  }
+  return groups.slice(0, 4).join(':');
+}
+
+export function createRelay({
+  trustProxy = false, maxHubs = 128, allowedHubIds,
+}: { trustProxy?: boolean; maxHubs?: number; allowedHubIds?: ReadonlySet<string> } = {}) {
   const hubs = new Map<string, Hub>();
   const limits = new Map<string, number>();
-  function allowed(request: IncomingMessage, upgrade: boolean): boolean {
+  const hubsByAddress = new Map<string, number>();
+  const maxHubsPerAddress = Math.min(8, Math.max(1, maxHubs - 1));
+  function clientAddress(request: IncomingMessage): string {
     const forwarded = request.headers['x-agent-hub-client-ip'];
-    const address = trustProxy && typeof forwarded === 'string' ? forwarded : request.socket.remoteAddress;
+    return addressGroup((trustProxy && typeof forwarded === 'string' && isIP(forwarded) ? forwarded : request.socket.remoteAddress) ?? '');
+  }
+  function allowed(address: string, upgrade: boolean): boolean {
     const key = `${upgrade}:${address}`;
     const count = (limits.get(key) ?? 0) + 1;
     if (count > (upgrade ? 60 : 600) || (!limits.has(key) && limits.size >= 10_000)) return false;
@@ -38,7 +57,7 @@ export function createRelay({ trustProxy = false, maxHubs = 128 }: { trustProxy?
     response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     response.setHeader('Cache-Control', 'no-store, no-transform');
-    if (!allowed(request, false)) return fail(response, 429);
+    if (!allowed(clientAddress(request), false)) return fail(response, 429);
     if (request.method === 'GET' && request.url === '/health') return response.end('ok');
     const raw = request.url || '';
     const id = raw.slice(routePrefix.length, routePrefix.length + 64);
@@ -93,19 +112,26 @@ export function createRelay({ trustProxy = false, maxHubs = 128 }: { trustProxy?
     const secret = request.headers.authorization?.slice(7) ?? '';
     const tokenHash = request.headers['x-agent-hub-token-hash'];
     const reject = (status: string) => socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
-    if (!allowed(request, true)) return reject('429 Too Many Requests');
+    const address = clientAddress(request);
+    if (!allowed(address, true)) return reject('429 Too Many Requests');
     if (request.url !== registrationPath || !request.headers.authorization?.startsWith('Bearer ') ||
       !hexKey.test(secret) || typeof tokenHash !== 'string' || !hexKey.test(tokenHash)) return reject('401 Unauthorized');
     const id = digest(secret);
+    if (allowedHubIds && !allowedHubIds.has(id)) return reject('403 Forbidden');
     if (hubs.has(id)) return reject('409 Conflict');
+    if (!allowedHubIds && (hubsByAddress.get(address) ?? 0) >= maxHubsPerAddress) return reject('429 Too Many Requests');
     if (hubs.size >= maxHubs) return reject('503 Service Unavailable');
     sockets.handleUpgrade(request, socket, head, (ws) => {
       const hub: Hub = { ws, tokenHash: Buffer.from(tokenHash, 'hex'), pending: new Map(), alive: true };
       hubs.set(id, hub);
+      hubsByAddress.set(address, (hubsByAddress.get(address) ?? 0) + 1);
       ws.on('pong', () => { hub.alive = true; });
       ws.on('error', () => ws.terminate());
       ws.on('close', () => {
         hubs.delete(id);
+        const count = (hubsByAddress.get(address) ?? 1) - 1;
+        if (count) hubsByAddress.set(address, count);
+        else hubsByAddress.delete(address);
         for (const { response } of hub.pending.values()) fail(response, 503);
       });
       ws.on('message', (raw) => {
