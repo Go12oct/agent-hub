@@ -66,7 +66,10 @@ $port = 4747
 $configPath = Join-Path $configDir "config.json"
 if (Test-Path $configPath) {
   $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
-  $port = [int]$config.port
+  $configPort = 0
+  if ([int]::TryParse([string]$config.port, [ref]$configPort) -and $configPort -gt 0) {
+    $port = $configPort
+  }
 }
 if ($env:AGENT_HUB_PORT) { $port = [int]$env:AGENT_HUB_PORT }
 $healthUrl = "http://127.0.0.1:$port/health"

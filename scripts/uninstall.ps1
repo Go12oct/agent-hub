@@ -14,7 +14,21 @@ $configPath = Join-Path $configDirectory "config.json"
 if (Test-Path $shim) {
   & $shim uninstall-claude-hooks
   & $shim uninstall-codex-hooks
-  & $shim uninstall-service
+}
+
+try {
+  Get-ScheduledTask -TaskName AgentHub -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+} catch {
+  Write-Warning "Could not remove the AgentHub Scheduled Task: $($_.Exception.Message)"
+}
+$startupLauncher = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\AgentHub.vbs"
+if (Test-Path $startupLauncher) {
+  Remove-Item -LiteralPath $startupLauncher -Force
+}
+try {
+  Get-NetFirewallRule -DisplayName 'Agent Hub' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+} catch {
+  Write-Warning "Could not remove the Windows Firewall rule; ask an administrator to remove it: $($_.Exception.Message)"
 }
 
 try {
