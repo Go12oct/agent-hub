@@ -95,6 +95,69 @@ jobs:
           }
           if (-not (Test-Path "$env:LOCALAPPDATA\agent-hub\start-hidden.vbs")) { throw 'Hidden launcher missing' }
           Write-Host "Healthy at $url after background launcher startup, without Node on PATH."
+      - name: Reinstall while running and recover Explorer ZIP launch
+        timeout-minutes: 6
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          $zone = "[ZoneTransfer]`r`nZoneId=3"
+          $folder = Join-Path $env:RUNNER_TEMP 'download\agent-hub'
+          $downloads = Join-Path $env:USERPROFILE 'Downloads'
+          New-Item -ItemType Directory -Force $downloads | Out-Null
+          $zip = Join-Path $downloads 'agent-hub-windows (1).zip'
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'agent-hub-windows.zip') $zip -Force
+          Set-Content -LiteralPath $zip -Stream Zone.Identifier -Value $zone
+          $partial = Join-Path $env:TEMP "$([guid]::NewGuid())_agent-hub-windows (1).zip.25f\agent-hub"
+          New-Item -ItemType Directory -Force $partial | Out-Null
+          Copy-Item (Join-Path $folder 'Install-AgentHub.cmd') $partial
+          foreach ($scenario in @('reinstall', 'zip-launch')) {
+            $workingDirectory = if ($scenario -eq 'reinstall') { $folder } else { $partial }
+            Get-ChildItem $workingDirectory -Recurse -File -Force | ForEach-Object {
+              Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value $zone
+            }
+            $port = 4747
+            $configPath = Join-Path $env:APPDATA 'agent-hub\config.json'
+            if (Test-Path $configPath) {
+              $config = Get-Content $configPath -Raw | ConvertFrom-Json
+              if ($config.port) { $port = [int]$config.port }
+            }
+            $url = "http://127.0.0.1:$port/health"
+            if ((Invoke-RestMethod $url).ok -ne $true) { throw 'Daemon must be running before reinstall' }
+            $stdout = Join-Path $env:RUNNER_TEMP "install.$scenario.stdout.log"
+            $stderr = Join-Path $env:RUNNER_TEMP "install.$scenario.stderr.log"
+            $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', 'Install-AgentHub.cmd -SkipPair < NUL') -WorkingDirectory $workingDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+            $null = $process.Handle
+            if (-not $process.WaitForExit(150000)) {
+              taskkill.exe /PID $process.Id /T /F
+              throw "$scenario installer timed out"
+            }
+            Get-Content $stdout, $stderr
+            if ($process.ExitCode -ne 0) { throw "$scenario failed with exit code $($process.ExitCode)" }
+            if ((Invoke-RestMethod $url).ok -ne $true) { throw "$scenario /health failed" }
+            Write-Host "$scenario succeeded and /health is OK."
+          }
+      - name: ZIP recovery failures show extraction instructions
+        run: |
+          $name = "agent-hub-missing-$([guid]::NewGuid()).zip"
+          $partial = Join-Path $env:TEMP "$([guid]::NewGuid())_$name.25f\agent-hub"
+          New-Item -ItemType Directory -Force $partial | Out-Null
+          Copy-Item scripts/Install-AgentHub.cmd $partial
+          $zip = Join-Path $env:USERPROFILE "Downloads\$name"
+          try {
+            foreach ($scenario in @('missing', 'corrupt')) {
+              if ($scenario -eq 'corrupt') { Set-Content -LiteralPath $zip -Value 'not a ZIP archive' }
+              $output = & $env:ComSpec /d /c "`"$partial\Install-AgentHub.cmd`" -SkipPair < NUL" 2>&1
+              $result = $LASTEXITCODE
+              $output | Write-Host
+              if ($result -eq 0) { throw "$scenario ZIP unexpectedly succeeded" }
+              if (($output -join "`n") -notlike '*Right-click agent-hub-windows.zip > Extract All, open the extracted folder, then double-click Install-AgentHub.cmd*') {
+                throw "$scenario ZIP did not show extraction instructions"
+              }
+              Write-Host "$scenario ZIP failed safely with extraction instructions."
+            }
+          } finally {
+            Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+          }
+          $global:LASTEXITCODE = 0
       - name: Dump failure diagnostics
         if: failure()
         run: |
