@@ -51,11 +51,12 @@ the EventSource URL includes a pairing token.
 
 ## 3. Enable remote pairing
 
-To enable the relay in all future Windows releases, set the GitHub Actions
-repository variable `AGENT_HUB_DEFAULT_RELAY_URL` to the relay's HTTPS origin
-before building a release. For a local build, set the same environment
-variable when running `npm run build:daemon`. Customers can then scan the
-normal QR code without configuring a relay address on their PC.
+Windows releases use [the hosted Agent Hub relay](https://92-5-42-80.sslip.io/health)
+by default. Customers can scan the normal pairing QR without configuring a
+relay address. To ship releases that use your own relay instead, set the
+optional GitHub Actions repository variable `AGENT_HUB_DEFAULT_RELAY_URL` to
+its HTTPS origin. Local builds have no bundled relay unless you set the same
+environment variable when running `npm run build:daemon`.
 
 To enable the relay on an installed PC or override the release default:
 
@@ -70,8 +71,8 @@ Scan the QR with the updated phone app, turn off phone Wi-Fi, and check that
 the live feed still updates. An existing phone pairing can also pick up the
 relay automatically the next time it connects directly to that PC.
 
-No default hostname is shipped before a relay exists. `AGENT_HUB_RELAY_URL`
-can override `relayUrl` when it is available to both the daemon and pairing
+`AGENT_HUB_RELAY_URL` can override `relayUrl` and the bundled default when it
+is available to both the daemon and pairing
 command. Set `relayUrl` to `false` and restart to disable the tunnel.
 
 ## Trust and limits
