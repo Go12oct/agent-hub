@@ -1,0 +1,115 @@
+name: Windows fresh install
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'devin/*-ci-fresh-install', '**-revert-check']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build:web
+      - run: npm run build:daemon
+      - name: Build Windows executable
+        run: |
+          node daemon/scripts/build-sea.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'daemon/dist/agent-hub.exe')) { throw 'SEA executable missing' }
+      - name: Assemble Windows package
+        run: ./scripts/build-windows-package.ps1
+      - name: Simulate browser download with Mark-of-the-Web
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'agent-hub-windows.zip'
+          $zone = "[ZoneTransfer]`r`nZoneId=3"
+          Set-Content -LiteralPath $zip -Stream Zone.Identifier -Value $zone
+          $destination = Join-Path $env:RUNNER_TEMP 'download'
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination
+          $files = @(Get-ChildItem $destination -Recurse -File -Force)
+          if ($files.Count -eq 0) { throw 'Downloaded package is empty' }
+          foreach ($file in $files) {
+            Set-Content -LiteralPath $file.FullName -Stream Zone.Identifier -Value $zone
+          }
+          foreach ($file in @($zip) + @($files.FullName)) {
+            if ((Get-Content -LiteralPath $file -Stream Zone.Identifier -Raw) -notmatch 'ZoneId=3') {
+              throw "Mark-of-the-Web missing: $file"
+            }
+          }
+          Write-Host "Verified Internet zone on zip and all $($files.Count) extracted files."
+      - name: Install through CMD without Node
+        timeout-minutes: 4
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          if (Get-Command node -ErrorAction SilentlyContinue) { throw 'Node is still on PATH' }
+          $folder = Join-Path $env:RUNNER_TEMP 'download\agent-hub'
+          $stdout = Join-Path $env:RUNNER_TEMP 'install.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'install.stderr.log'
+          # Skip pairing; EOF satisfies CMD's final pause without bypassing the launcher.
+          $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', 'Install-AgentHub.cmd -SkipPair < NUL') -WorkingDirectory $folder -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          if (-not $process.WaitForExit(150000)) {
+            taskkill.exe /PID $process.Id /T /F
+            Write-Warning 'Installer exceeded 150 seconds; health check will determine startup outcome.'
+          } else {
+            Write-Host "Installer exit code: $($process.ExitCode)"
+            Set-Content (Join-Path $env:RUNNER_TEMP 'install.exit') $process.ExitCode
+          }
+          Get-Content $stdout, $stderr
+      - name: Verify /health
+        timeout-minutes: 2
+        run: |
+          $port = 4747
+          $configPath = Join-Path $env:APPDATA 'agent-hub\config.json'
+          if (Test-Path $configPath) {
+            $config = Get-Content $configPath -Raw | ConvertFrom-Json
+            if ($config.port) { $port = [int]$config.port }
+          }
+          $url = "http://127.0.0.1:$port/health"
+          $healthy = $false
+          $deadline = [DateTime]::UtcNow.AddSeconds(60)
+          do {
+            try {
+              $response = Invoke-WebRequest -Uri $url -TimeoutSec 2
+              if ($response.StatusCode -eq 200 -and ($response.Content | ConvertFrom-Json).ok -eq $true) {
+                $healthy = $true
+                break
+              }
+            } catch {}
+            Start-Sleep -Milliseconds 500
+          } while ([DateTime]::UtcNow -lt $deadline)
+          if (-not $healthy) { throw "Agent Hub /health did not return 200 at $url within 60 seconds" }
+          $exitFile = Join-Path $env:RUNNER_TEMP 'install.exit'
+          if (-not (Test-Path $exitFile) -or (Get-Content $exitFile) -ne '0') { throw 'Installer did not complete successfully' }
+          if (Select-String -Path "$env:RUNNER_TEMP\install.*.log" -Pattern 'Trying a direct hidden start' -Quiet) {
+            throw 'Health passed only after direct fallback, not the background launcher'
+          }
+          if (-not (Test-Path "$env:LOCALAPPDATA\agent-hub\start-hidden.vbs")) { throw 'Hidden launcher missing' }
+          Write-Host "Healthy at $url after background launcher startup, without Node on PATH."
+      - name: Dump failure diagnostics
+        if: failure()
+        run: |
+          Get-ChildItem "$env:RUNNER_TEMP\install.*.log", "$env:LOCALAPPDATA\agent-hub\*.log" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "--- $($_.FullName) ---"
+            Get-Content $_.FullName -Tail 200
+          }
+          Get-ScheduledTask -TaskName AgentHub -ErrorAction SilentlyContinue | Format-List *
+          Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'agent-hub|wscript' } | Select-Object Name, ProcessId, ParentProcessId, CommandLine | Format-List
+      - name: Uninstall
+        if: always()
+        timeout-minutes: 2
+        run: |
+          $uninstall = Join-Path $env:RUNNER_TEMP 'download\agent-hub\uninstall.ps1'
+          if (Test-Path $uninstall) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstall
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

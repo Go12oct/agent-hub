@@ -11,6 +11,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require tag commit on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: Ensure GitHub release exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,24 +51,7 @@ jobs:
         run: node daemon/scripts/build-sea.mjs
       - name: Assemble Windows package
         shell: pwsh
-        run: |
-          $packageRoot = Join-Path $env:RUNNER_TEMP 'agent-hub'
-          $dist = Join-Path $packageRoot 'daemon\dist'
-          $public = Join-Path $packageRoot 'daemon\public'
-          New-Item -ItemType Directory -Force -Path $dist, $public | Out-Null
-          Copy-Item 'daemon/dist/agent-hub.cjs' $dist -Force
-          Copy-Item 'daemon/dist/hook-bridge.cjs' $dist -Force
-          Copy-Item 'daemon/public/*' $public -Recurse -Force
-          if (Test-Path 'daemon/dist/agent-hub.exe') {
-            Copy-Item 'daemon/dist/agent-hub.exe' $dist -Force
-          }
-          Copy-Item 'scripts/install.ps1' $packageRoot -Force
-          Copy-Item 'scripts/uninstall.ps1' $packageRoot -Force
-          Copy-Item 'scripts/tray.ps1' $packageRoot -Force
-          Copy-Item 'scripts/Install-AgentHub.cmd' $packageRoot -Force
-          Copy-Item 'scripts/Uninstall-AgentHub.cmd' $packageRoot -Force
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'agent-hub-windows.zip'
-          Compress-Archive -Path $packageRoot -DestinationPath $zipPath -Force
+        run: ./scripts/build-windows-package.ps1
       - name: Upload Windows assets
         shell: pwsh
         env:
