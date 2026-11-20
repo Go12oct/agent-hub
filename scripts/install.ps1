@@ -107,6 +107,16 @@ if (-not (Wait-AgentHub)) {
   if (-not (Wait-AgentHub)) {
     Write-Error "Agent Hub is not healthy at $healthUrl after background and direct startup attempts. Installation failed. Log: $logPath"
   }
+  $trayRunning = $false
+  try {
+    $trayMutex = [System.Threading.Mutex]::OpenExisting('Local\AgentHubTray')
+    $trayMutex.Dispose()
+    $trayRunning = $true
+  } catch [System.Threading.WaitHandleCannotBeOpenedException] {}
+  if (-not $trayRunning) {
+    $installedTray = Join-Path $installDir "tray.ps1"
+    Start-Process -FilePath "powershell.exe" -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', "`"$installedTray`"") -WindowStyle Hidden
+  }
 }
 Write-Host "Agent Hub is running ($healthUrl). Log: $logPath"
 Write-Host "Phone access through Windows Firewall needs one administrator UAC approval."
