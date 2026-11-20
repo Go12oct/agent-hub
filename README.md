@@ -35,6 +35,9 @@ that the ZIP came from this project's release page before choosing Run. If start
 fails, the installer stays open with an error and the daemon log location
 (`%LOCALAPPDATA%\agent-hub\agent-hub.log` by default).
 
+Release maintainers: see [Windows code signing](docs/windows-code-signing.md)
+for optional signed executable setup and SmartScreen limitations.
+
 The daemon's configuration and random access token are stored in
 `%APPDATA%\agent-hub\config.json`. Keep this file private. The token is never
 printed by the daemon or included in routine logs; the pairing QR code
@@ -79,6 +82,35 @@ existing hooks file without removing other tools' entries. Open Codex and run
 `/hooks` once to trust the hooks. Codex asks for permission through Agent Hub
 when a tool approval is actually requested; hooks will not fire when
 `approval_policy = "never"` prevents permission prompts.
+
+## Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+Signing is subject to Foundation acceptance and configuration; releases may be
+unsigned until onboarding is complete. See [Windows code signing](docs/windows-code-signing.md).
+
+- Committers/authors: [Go12oct](https://github.com/Go12oct)
+- Reviewers: [Go12oct](https://github.com/Go12oct)
+- Approvers: [Go12oct](https://github.com/Go12oct); every release requires manual
+  signing approval. Maintainers must use MFA for GitHub and SignPath.
+
+### Privacy policy
+
+Agent Hub reads local agent sessions and serves them to clients the user pairs
+or connects to the daemon over localhost, the LAN, or a user-configured
+[Tailscale](https://tailscale.com/privacy-policy) network. Remote integrations
+are user-configured: supplying Devin credentials enables calls to the
+[Devin API](https://www.cognition.ai/privacy-policy) to read sessions and send
+user-requested replies; enabling experimental Codex Cloud polling uses local
+Codex credentials to query [OpenAI](https://openai.com/policies/privacy-policy/).
+Configuring an ntfy topic sends notification titles, session/project identifiers,
+status and message/approval summaries to the selected server (ntfy.sh by default;
+see [ntfy privacy](https://ntfy.sh/docs/privacy/)). Notifications can include
+session content; choose a private topic or self-hosted server. Remove the topic
+to disable notifications, remove Devin credentials to disable its integration,
+and keep `codexCloud.enabled` false to disable cloud polling. Agent Hub does not
+send telemetry to its maintainers. Local agent CLIs invoked for user-requested
+replies may contact their providers under the user's existing configuration.
 
 ## Agent support
 
