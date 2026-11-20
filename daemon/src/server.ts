@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { agentLabels, type AgentSession, type SessionMessage } from '@agent-hub/shared';
+import packageJson from '../package.json' with { type: 'json' };
 import type { Collector, EmitSession } from './collectors/types.js';
 import { ClaudeCollector, type ClaudeHookPayload } from './collectors/claude.js';
 import { CodexCollector, type CodexHookPayload } from './collectors/codex.js';
@@ -427,6 +428,6 @@ export async function startServer(config: HubConfig): Promise<HubRuntime> {
     const local = address.address === '0.0.0.0' ? '127.0.0.1' : address.address === '::' ? '::1' : address.address;
     disconnect = connectRelay(config.relay, `http://${local.includes(':') ? `[${local}]` : local}:${address.port}`, config.token);
   }
-  console.log(`Agent Hub listening on ${config.host}:${config.port}`);
+  console.log(`Agent Hub v${packageJson.version} listening on ${config.host}:${config.port}`);
   return runtime;
 }
