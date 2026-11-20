@@ -1,6 +1,6 @@
 import { MotionConfig, motion } from 'motion/react'
 import { ChevronDown, Download, Smartphone } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { LiveDemo } from './demo/LiveDemo'
 import { Background } from './Background'
 import { Story, type Beat } from './Story'
@@ -9,7 +9,7 @@ import { ease } from './demo/ui'
 const REPO = 'https://github.com/Go12oct/agent-hub'
 const WIN = `${REPO}/releases/latest/download/agent-hub-windows.zip`
 const APK = `${REPO}/releases/latest/download/agent-hub-android.apk`
-const VERSION = 'v0.2.3'
+const LATEST_RELEASE_API = 'https://api.github.com/repos/Go12oct/agent-hub/releases/latest'
 
 const link = 'underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-text-2'
 const code = 'rounded-md border border-line bg-raised px-1.5 py-0.5 font-mono text-[13px] text-text'
@@ -84,6 +84,22 @@ function Ctas() {
 }
 
 export default function App() {
+  const [version, setVersion] = useState('Latest release')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        const response = await fetch(LATEST_RELEASE_API, { signal: controller.signal })
+        if (!response.ok) return
+        const release = await response.json() as { tag_name?: unknown } | null
+        const tag = release?.tag_name
+        if (!controller.signal.aborted && typeof tag === 'string' && tag.trim()) setVersion(tag.trim())
+      } catch { /* Keep the generic label if GitHub is unavailable. */ }
+    })()
+    return () => controller.abort()
+  }, [])
+
   return (
     <MotionConfig reducedMotion="user">
       <Background />
@@ -105,7 +121,7 @@ export default function App() {
             <h1 className="mx-auto mt-5 max-w-[820px] text-[44px] font-medium leading-[1.04] tracking-[-0.035em] sm:text-[70px]">Leave your desk.<br /><span className="text-text-2">Your agents keep going.</span></h1>
             <p className="mx-auto mt-6 max-w-[600px] text-[17px] leading-relaxed text-text-2 sm:text-[18px]">Agent Hub puts every Claude Code, Codex, Devin and Antigravity chat from your PC on your Android phone. Allow a command, answer a question, get pinged when one stops. Your IDE and agents stay exactly as they are.</p>
             <div className="mt-9"><Ctas /></div>
-            <p className="mt-4 font-mono text-[12px] text-muted">{VERSION} · Windows 10 or 11 · Android 8 or later · MIT licensed</p>
+            <p className="mt-4 font-mono text-[12px] text-muted">{version} · Windows 10 or 11 · Android 8 or later · MIT licensed</p>
           </motion.div>
         </header>
 
