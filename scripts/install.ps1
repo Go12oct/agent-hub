@@ -15,6 +15,32 @@ $traySource = Join-Path $sourceDir "tray.ps1"
 if (-not (Test-Path $traySource)) {
   $traySource = Join-Path $packageRoot "scripts\tray.ps1"
 }
+if (Test-Path $installDir) {
+  $task = Get-ScheduledTask -TaskName AgentHub -ErrorAction SilentlyContinue
+  if ($task) { $task | Stop-ScheduledTask }
+  $startupLauncher = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\AgentHub.vbs"
+  if (Test-Path -LiteralPath $startupLauncher) { Remove-Item -LiteralPath $startupLauncher -Force }
+  $installedLauncher = Join-Path $installDir "start-hidden.vbs"
+  Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -in @('wscript.exe', 'cscript.exe') -and $_.CommandLine -and
+    ($_.CommandLine.Contains($installedLauncher) -or $_.CommandLine.Contains($startupLauncher))
+  } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Get-Process | Where-Object {
+    $_.Path -and [IO.Path]::GetDirectoryName($_.Path) -ieq $installDir
+  } | Stop-Process -Force
+  $installedExe = Join-Path $installDir "agent-hub.exe"
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (Test-Path -LiteralPath $installedExe) {
+    try {
+      $handle = [IO.File]::Open($installedExe, 'Open', 'ReadWrite', 'None')
+      $handle.Dispose()
+      break
+    } catch {
+      if ([DateTime]::UtcNow -ge $deadline) { throw "Agent Hub executable is still locked after 30 seconds: $installedExe. $($_.Exception.Message)" }
+      Start-Sleep -Milliseconds 250
+    }
+  }
+}
 if (Test-Path $standalone) {
   New-Item -ItemType Directory -Force -Path $installDir | Out-Null
   Copy-Item $standalone (Join-Path $installDir "agent-hub.exe") -Force
