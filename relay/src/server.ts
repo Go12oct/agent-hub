@@ -30,6 +30,12 @@ function addressGroup(address: string): string {
     const end = right ? right.split(':') : [];
     groups.push(...Array<string>(8 - groups.length - end.length).fill('0'), ...end);
   }
+  if (groups[5] === 'ffff' && groups.slice(0, 5).every((part) => part === '0')) {
+    return groups.slice(6).flatMap((part) => {
+      const value = Number.parseInt(part, 16);
+      return [value >>> 8, value & 255];
+    }).join('.');
+  }
   return groups.slice(0, 4).join(':');
 }
 

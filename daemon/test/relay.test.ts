@@ -41,6 +41,25 @@ it('admits only configured hubs or enforces concurrent registrations per source'
   }
 });
 
+it('shares a quota between native and mapped forms of the same IPv4 address', async () => {
+  const relay = createRelay({ maxHubs: 2, trustProxy: true });
+  try {
+    relay.server.listen(0, '127.0.0.1');
+    await once(relay.server, 'listening');
+    const { port } = relay.server.address() as AddressInfo;
+    const connect = (address: string) => new WebSocket(`ws://127.0.0.1:${port}/connect`, { headers: {
+      Authorization: `Bearer ${randomBytes(32).toString('hex')}`,
+      'X-Agent-Hub-Token-Hash': digest('test'),
+      'X-Agent-Hub-Client-IP': address,
+    } });
+
+    await once(connect('::ffff:192.0.2.1'), 'open');
+    const [error] = await once(connect('192.0.2.1'), 'error');
+    expect(error.message).toContain('429');
+    await once(connect('::ffff:192.0.2.2'), 'open');
+  } finally { await relay.close(); }
+});
+
 it('relays authenticated phone requests and live events and reconnects after a restart', async () => {
   let emit: EmitSession | undefined;
   const sendMessage = vi.fn(async () => {});
