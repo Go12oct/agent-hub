@@ -37,6 +37,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,32 +54,49 @@ jobs:
         id: windows-signing
         shell: pwsh
         env:
-          ES_USERNAME: ${{ secrets.ES_USERNAME }}
-          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
-          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
-          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
         run: |
           if (-not (Test-Path 'daemon/dist/agent-hub.exe')) {
             Write-Output '::warning::Skipping Windows signing: agent-hub.exe is missing.'
             'enabled=false' >> $env:GITHUB_OUTPUT
-          } elseif (-not $env:ES_USERNAME -or -not $env:ES_PASSWORD -or -not $env:ES_CREDENTIAL_ID -or -not $env:ES_TOTP_SECRET) {
-            Write-Output '::warning::Skipping Windows signing: one or more eSigner repository secrets are missing.'
+          } elseif (-not $env:SIGNPATH_API_TOKEN -or -not $env:SIGNPATH_ORGANIZATION_ID -or -not $env:SIGNPATH_PROJECT_SLUG -or -not $env:SIGNPATH_SIGNING_POLICY_SLUG) {
+            Write-Output '::warning::Skipping Windows signing: SignPath repository secret or variables are missing.'
             'enabled=false' >> $env:GITHUB_OUTPUT
           } else {
             'enabled=true' >> $env:GITHUB_OUTPUT
           }
+      - name: Upload unsigned Windows executable
+        id: unsigned-windows
+        if: steps.windows-signing.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-windows-executable
+          path: daemon/dist/agent-hub.exe
+          if-no-files-found: error
       - name: Sign Windows executable
         if: steps.windows-signing.outputs.enabled == 'true'
-        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        uses: signpath/github-action-submit-signing-request@a2c5b60d9c75f073142b653c354b632eedce097b # v3.2
+        timeout-minutes: 130
         with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/daemon/dist/agent-hub.exe
-          override: true
-          clean_logs: true
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: ${{ runner.temp }}/signed-windows
+      - name: Restore signed Windows executable
+        if: steps.windows-signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/signed-windows" -Filter 'agent-hub.exe' -File -Recurse)
+          if ($files.Count -ne 1) { throw "Expected one signed agent-hub.exe, found $($files.Count)" }
+          Copy-Item -LiteralPath $files[0].FullName -Destination 'daemon/dist/agent-hub.exe' -Force
       - name: Verify Windows executable signature
         if: steps.windows-signing.outputs.enabled == 'true'
         shell: pwsh

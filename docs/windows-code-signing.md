@@ -1,54 +1,53 @@
 # Windows code signing
 
-For an individual developer based in the UAE, the recommended paid option is an
-[SSL.com Individual Validation (IV) code signing certificate](https://www.ssl.com/products/software-integrity/signing-service/)
-($129/year) plus [eSigner cloud signing](https://www.ssl.com/guide/esigner-pricing-for-code-signing/)
-($180/year for 240 signatures), approximately **$309/year** before taxes or extras.
-Confirm current prices and UAE identity-validation support with SSL.com before
-purchasing. IV does not require forming a company.
+Agent Hub uses optional free [SignPath Foundation](https://signpath.org/) signing.
+The certificate publisher is **SignPath Foundation**. Every release needs manual
+approval. Until onboarding is complete, releases remain unsigned with a warning.
 
-## Set up release signing
+## Setup
 
-1. Buy the IV certificate and eSigner cloud signing plan, and complete SSL.com's
-   identity validation.
-2. Enroll the certificate in eSigner and follow SSL.com's
-   [automated signing setup](https://www.ssl.com/how-to/automate-esigner-ev-code-signing)
-   to obtain the signing credential ID and TOTP secret. Treat the TOTP secret as
-   a signing credential, not as a disposable one-time code.
-3. In the repository's **Settings > Secrets and variables > Actions**, add:
-   `ES_USERNAME`, `ES_PASSWORD`, `ES_CREDENTIAL_ID`, and `ES_TOTP_SECRET`.
-   Never commit these values or print them in logs.
-4. Cut a release by pushing a version tag (`v*`) whose commit is on `main`.
-   The release workflow uses the official
-   [SSLcom/esigner-codesign action](https://github.com/SSLcom/esigner-codesign)
-   with `command: sign`, which signs and timestamps the final Node SEA executable
-   in place, after SEA injection and before ZIP assembly.
-5. Check the release workflow: signature verification must report `Valid`, with
-   a timestamp present, before packaging and uploading the executable.
+1. Review the [Foundation conditions](https://signpath.org/terms) and apply via
+   [OSS support](https://about.signpath.io/product/open-source). Explain the Node
+   SEA packaging and obtain approval: replacing Node's version metadata does not
+   itself satisfy the prohibition on signing upstream binaries. Acceptance is
+   discretionary; do not enable signing until this is resolved with SignPath.
+2. Create a project linked to `Go12oct/agent-hub`, configure GitHub.com as its
+   trusted build system, and install the SignPath GitHub App as instructed in the
+   [integration guide](https://docs.signpath.io/trusted-build-systems/github).
+   All jobs leading to signing must use GitHub-hosted runners.
+3. Create an artifact configuration with a ZIP root containing `agent-hub.exe`.
+   `actions/upload-artifact@v4` archives the single EXE at the root. Configure
+   Authenticode signing with a timestamp, enforce ProductName **Agent Hub**, and
+   require the release version from root `package.json`. The SEA builder sets
+   the application's version resources before injecting its code.
+4. Create a release signing policy with the Foundation certificate, restrict
+   permitted release refs/build origins, and require manual approval by Go12oct.
+   Enable MFA for GitHub and SignPath. Give the token's user submitter access,
+   not permission to bypass approval.
+5. Under repository **Settings > Secrets and variables > Actions**, add secret
+   `SIGNPATH_API_TOKEN` and variables `SIGNPATH_ORGANIZATION_ID`,
+   `SIGNPATH_PROJECT_SLUG`, and `SIGNPATH_SIGNING_POLICY_SLUG`. Optionally add
+   `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`; otherwise the project default is used.
+   Never commit or log the API token.
+6. Push a version tag (`v*`) whose commit is on `main`. Open the signing request
+   linked in workflow output and approve it in SignPath within two hours. Link
+   the README's [Code signing policy](../README.md#code-signing-policy) from
+   release/download pages, as required by the Foundation.
 
-If any signing secret or the executable is missing, the workflow warns and keeps
-the existing unsigned-release behavior. If configured signing or verification
-fails, the Windows job fails rather than publishing an unsigned substitute.
-Only `agent-hub.exe` is signed; the `.ps1`/`.cmd` scripts and ZIP are not signed
+The release job uploads the unsigned executable, waits up to 7,200 seconds for
+signing, and extracts the returned archive into a separate directory. It requires
+exactly one `agent-hub.exe` (including nested paths), copies it into `daemon/dist`,
+and requires a `Valid` Authenticode signature and timestamp before ZIP assembly.
+`actions: read` lets the connector inspect artifacts; `contents: write` permits
+release uploads. The action is pinned to a reviewed v3.2 commit.
+
+Missing EXE, token, or required variables produces a warning and preserves the
+existing unsigned-release behavior. Configured signing failures, approval
+timeouts, missing outputs, or invalid signatures fail the Windows job instead
+of publishing an unsigned substitute. Scripts and the release ZIP are not signed
 by this step.
 
-Signing establishes publisher identity and integrity, but **SmartScreen reputation
-still builds over time**. New signed releases can still show “Windows protected
-your PC.” Microsoft says the immediate EV SmartScreen bypass was removed in
-2024, so do not buy EV solely to avoid that prompt. See
-[Microsoft's signing comparison](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options).
-
-## Alternatives
-
-- [Azure Artifact Signing](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart)
-  accepts individual developers only in the US and Canada, not the UAE.
-- [Certum OSS cloud signing](https://shop.certum.eu/open-source-code-signing-on-simplysign.html)
-  is listed at €49, but relies on SimplySign mobile access codes and a desktop
-  application. Fully unattended GitHub Actions signing is not officially
-  documented; do not assume it is CI-automatable. See the
-  [official application requirements](https://support.certum.eu/en/installation-of-the-simplysign-applications/).
-- [SignPath Foundation](https://signpath.org/) is a free alternative for accepted
-  OSS projects. The publisher shown is **SignPath Foundation**, and every release
-  requires manual approval by an authorized project member. Review its
-  [eligibility and signing policy](https://signpath.org/terms) before applying;
-  an MIT license alone does not guarantee acceptance.
+Signing establishes publisher identity and integrity, but SmartScreen reputation
+still builds over time. Initial “Windows protected your PC” warnings may remain.
+[Microsoft says](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options)
+the immediate EV SmartScreen bypass was removed in 2024.
