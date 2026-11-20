@@ -63,6 +63,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $configDir = if ($env:AGENT_HUB_CONFIG_DIR) { $env:AGENT_HUB_CONFIG_DIR } else { Join-Path $env:APPDATA "agent-hub" }
 $port = 4747
+$healthHost = "127.0.0.1"
 $configPath = Join-Path $configDir "config.json"
 if (Test-Path $configPath) {
   $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
@@ -70,9 +71,14 @@ if (Test-Path $configPath) {
   if ([int]::TryParse([string]$config.port, [ref]$configPort) -and $configPort -gt 0) {
     $port = $configPort
   }
+  $configuredHost = ([string]$config.host).Trim()
+  if ($configuredHost -notin @('', '0.0.0.0', '::', 'localhost')) {
+    $healthHost = $configuredHost
+  }
 }
 if ($env:AGENT_HUB_PORT) { $port = [int]$env:AGENT_HUB_PORT }
-$healthUrl = "http://127.0.0.1:$port/health"
+$healthAuthority = if ($healthHost.Contains(':') -and -not $healthHost.StartsWith('[')) { "[$healthHost]" } else { $healthHost }
+$healthUrl = "http://${healthAuthority}:$port/health"
 $logPath = if ($env:AGENT_HUB_LOG) { $env:AGENT_HUB_LOG } else { Join-Path $installDir "agent-hub.log" }
 
 function Wait-AgentHub {
