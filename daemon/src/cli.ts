@@ -13,6 +13,7 @@ import { installCodexHooks, uninstallCodexHooks } from './codex-hooks.js';
 import { runHookBridge } from './hook-bridge.js';
 import { firewallRuleScript } from './firewall.js';
 import { lanUrls, startServer } from './server.js';
+import { relayBaseUrl } from './relay.js';
 import { installWindowsService, isDaemonHealthy, requestDaemonShutdown, uninstallWindowsService } from './windows-service.js';
 
 function runProcess(command: string, args: string[]): Promise<void> {
@@ -94,7 +95,9 @@ async function run(): Promise<void> {
     console.log('Agent Hub pairing URLs (the phone tries them in this order):');
     displayedUrls.forEach((url) => console.log(`  ${url}${url === chosenUrl ? ' (first)' : ''}`));
     console.log("If the phone can't connect, put another URL first with: agent-hub pair --url http://<ip>:4747");
-    const pairing = `agenthub://pair?${displayedUrls.map((url) => `url=${encodeURIComponent(url)}`).join('&')}&token=${encodeURIComponent(config.token)}`;
+    const relay = config.relay ? relayBaseUrl(config.relay) : undefined;
+    if (relay) console.log(`  ${new URL(relay).origin} (remote fallback)`);
+    const pairing = `agenthub://pair?${displayedUrls.map((url) => `url=${encodeURIComponent(url)}`).join('&')}&token=${encodeURIComponent(config.token)}${relay ? `&relay=${encodeURIComponent(relay)}` : ''}`;
     qrcode.generate(pairing, { small: true });
   } else if (command === 'firewall') {
     if (process.platform !== 'win32') {

@@ -2,8 +2,8 @@
 
 One live feed for coding-agent sessions on your Windows PC, Android phone, and
 desktop browser. Agent Hub runs locally on your computer and serves its own
-web interface; the Android app connects to that daemon over your LAN or
-Tailscale.
+web interface; the Android app connects over your LAN, Tailscale, or an Agent Hub
+relay.
 
 ## Windows quick start
 
@@ -42,12 +42,15 @@ contains it for setup.
 
 ### Troubleshooting phone connections
 
-The PC and phone must be on the same reachable Wi-Fi or Tailscale network. If
+For access away from home without another app, [set up the Agent Hub relay on
+Oracle Cloud Always Free](relay/README.md) and scan the normal pairing QR code.
+The PC must stay online. For direct access, keep the PC and phone on the same
+reachable Wi-Fi or Tailscale network. If
 the phone cannot connect, choose the PC's Wi-Fi address when pairing. Avoid
 hotspot, virtual-adapter, and `169.254.x.x` addresses. If Windows Firewall
 permission was declined, ask an administrator to run `agent-hub firewall`.
 The rule allows the local subnet and Tailscale's `100.64.0.0/10` range.
-For access away from home, follow the [Tailscale setup guide](docs/tailscale.md).
+[Tailscale](docs/tailscale.md) remains an optional alternative.
 
 ### Notifications with ntfy
 
@@ -115,7 +118,7 @@ cd android && ./gradlew assembleDebug
 ```
 
 `npm run build` creates the Vite web app, copies it into the daemon's static
-directory, and bundles the Node daemon. `npm run dev -w app` starts the web
+directory, and bundles the Node daemon and relay. `npm run dev -w app` starts the web
 development server. The daemon can also be started with `npm run dev -w daemon`.
 The daemon defaults to port 4747 and binds to `0.0.0.0`; use a trusted LAN or
 Tailscale network because the Android client uses HTTP for local connectivity.
@@ -130,7 +133,10 @@ For development/test environments:
 ## Data and security
 
 The app sends the bearer token over the local network to authenticate requests.
-The pairing URL format is `agenthub://pair?url=<encoded-url>&token=<token>`.
+For remote access, traffic is protected by TLS to the relay; the relay operator
+can see the token and session data.
+The pairing URL format is `agenthub://pair?url=<encoded-url>&token=<token>`, with
+an additional `relay` parameter if a relay is configured.
 API routes require a bearer token (or a query token for EventSource clients);
 `/health` is unauthenticated. Treat the pairing QR code as a credential and
 re-pair after sharing it unintentionally. Agent Hub is intended for a private,

@@ -15,7 +15,7 @@ import { agentLabels, type AgentKind, type AgentSession, type PendingApproval, t
 import { liveNotificationIds, localNotificationId } from '../local-notifications';
 import { activityBuckets, approvalQueue, formatElapsed, type QueueItem } from '../home';
 import {
-  candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
+  candidateUrls, feedGroups, findReachable, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
   type PairingDetails,
 } from '../pairing';
 
@@ -97,10 +97,13 @@ async function savePairing(pairing: PairingDetails): Promise<void> {
   else localStorage.setItem('agent-hub-pairing', value);
 }
 
-async function reachable(url: string, token: string, timeout = 4000): Promise<boolean> {
+async function reachable(url: string, token: string, timeout: number, relay: boolean): Promise<boolean> {
   try {
     const nonce = newNonce();
-    const response = await fetch(`${url}/health?nonce=${nonce}`, { signal: AbortSignal.timeout(timeout) });
+    const response = await fetch(`${url}/health?nonce=${nonce}`, {
+      signal: AbortSignal.timeout(timeout),
+      ...(relay ? { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' } : {}),
+    });
     if (!response.ok) return false;
     const data = await response.json() as { service?: unknown; proof?: unknown };
     return data.service === 'agent-hub' && await verifyHubProof(token, nonce, data.proof);
@@ -149,6 +152,7 @@ async function sendDecision(
 
 export function AgentHub() {
   const [pairing, setPairing] = useState<PairingDetails>();
+  const [verifiedUrl, setVerifiedUrl] = useState<string>();
   const [pairLink, setPairLink] = useState<string>();
   const [ready, setReady] = useState(false);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
@@ -170,7 +174,7 @@ export function AgentHub() {
 
   useEffect(() => { void loadPairing().then((value) => { setPairing(value); setReady(true); }); }, []);
 
-  const url = pairing?.url;
+  const url = pairing?.url === verifiedUrl ? verifiedUrl : undefined;
   const token = pairing?.token;
 
   const clearLocalNotifications = useCallback(async (ids: number[]) => {
@@ -217,20 +221,30 @@ export function AgentHub() {
     if (!current || failingOver.current) return;
     failingOver.current = true;
     try {
-      for (const candidate of candidateUrls(current)) {
-        if (await reachable(candidate, current.token)) {
-          if (candidate !== current.url) {
-            const next = { ...current, url: candidate };
-            await savePairing(next);
-            setPairing(next);
-          }
-          return;
+      const candidate = await findReachable(current, (address, relay) => reachable(address, current.token, relay ? 8000 : 4000, relay));
+      if (pairingRef.current !== current) return;
+      if (candidate) {
+        if (candidate !== current.url) {
+          const next = { ...current, url: candidate, urls: current.urls ?? [current.url] };
+          await savePairing(next);
+          if (pairingRef.current !== current) return;
+          setPairing(next);
         }
+        setVerifiedUrl(candidate);
+      } else {
+        setConnection('offline');
       }
     } finally {
       failingOver.current = false;
     }
   }, []);
+
+  useEffect(() => {
+    if (!pairing || url) return;
+    void failover();
+    const timer = setInterval(() => void failover(), 5000);
+    return () => clearInterval(timer);
+  }, [pairing, url, failover]);
 
   const learnUrls = useCallback(async () => {
     const current = pairingRef.current;
@@ -238,9 +252,9 @@ export function AgentHub() {
     try {
       const response = await fetch(`${current.url}/api/pair`, { headers: { Authorization: `Bearer ${current.token}` } });
       if (!response.ok) return;
-      const data = await response.json() as { urls?: unknown };
-      const next = mergeKnownUrls(current, data.urls);
-      if (JSON.stringify(next.urls) !== JSON.stringify(current.urls)) {
+      const data = await response.json() as { urls?: unknown; relay?: unknown };
+      const next = mergeKnownUrls(current, data.urls, data.relay);
+      if (pairingRef.current === current && (next.relay !== current.relay || JSON.stringify(next.urls) !== JSON.stringify(current.urls))) {
         pairingRef.current = next;
         await savePairing(next);
         setPairing(next);
@@ -258,7 +272,9 @@ export function AgentHub() {
       setConnection('connected');
       void syncDeliveredNotifications(fetchedSessions);
     } catch {
+      if (pairingRef.current?.url !== url) return;
       setConnection('offline');
+      setVerifiedUrl(undefined);
       void failover();
     }
   }, [url, token, failover, syncDeliveredNotifications]);
@@ -333,7 +349,12 @@ export function AgentHub() {
       ]);
     });
     source.onopen = () => { setConnection('connected'); void refresh(); void learnUrls(); };
-    source.onerror = () => { setConnection('offline'); void failover(); };
+    source.onerror = () => {
+      source.close();
+      setConnection('offline');
+      setVerifiedUrl(undefined);
+      void failover();
+    };
     const poll = setInterval(() => void refresh(), 15_000);
     void refresh();
     return () => { alive = false; source.close(); clearInterval(poll); };
@@ -368,11 +389,11 @@ export function AgentHub() {
     if (!Capacitor.isNativePlatform()) return;
     let remove: (() => void) | undefined;
     void import('@capacitor/app').then(async ({ App }) => {
-      const handle = await App.addListener('resume', () => { void refresh(); });
+      const handle = await App.addListener('resume', () => { setVerifiedUrl(undefined); void failover(); });
       remove = () => { void handle.remove(); };
     }).catch(() => {});
     return () => remove?.();
-  }, [refresh]);
+  }, [failover]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -397,7 +418,7 @@ export function AgentHub() {
     .filter((session) => session.status === 'needs_input' || session.status === 'working')
     .sort((a, b) => (a.status === b.status ? Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : a.status === 'needs_input' ? -1 : 1)), [filtered]);
   const workingCount = filtered.filter((session) => session.status === 'working').length;
-  const activity = useActivity(activeTiles, pairing);
+  const activity = useActivity(activeTiles, url ? pairing : undefined);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!activeTiles.some((session) => session.status === 'working' && session.startedAt)) return;
@@ -436,6 +457,8 @@ export function AgentHub() {
   }, []);
 
   async function disconnect() {
+    pairingRef.current = undefined;
+    setVerifiedUrl(undefined);
     if (Capacitor.isNativePlatform()) await Preferences.remove({ key: 'pairing' });
     else localStorage.removeItem('agent-hub-pairing');
     setPairing(undefined);
@@ -449,7 +472,7 @@ export function AgentHub() {
     return (
       <Setup
         link={pairLink}
-        onPaired={(next) => { setPairLink(undefined); setPairing(next); }}
+        onPaired={(next) => { setPairLink(undefined); setPairing(next); setVerifiedUrl(next.url); }}
         onCancel={pairing ? () => setPairLink(undefined) : undefined}
       />
     );
@@ -461,6 +484,7 @@ export function AgentHub() {
         key={selectedSession.id}
         session={selectedSession}
         pairing={pairing}
+        online={Boolean(url)}
         onBack={() => {
           const transition = withViewTransition(() => {
             setTransitionSessionId(selectedSession.id);
@@ -480,7 +504,7 @@ export function AgentHub() {
   }
 
   async function decide(item: QueueItem, decision: 'allow' | 'deny') {
-    if (item.kind !== 'approval' || item.approval.readOnly || !pairing) return;
+    if (item.kind !== 'approval' || item.approval.readOnly || !pairing || !url) return;
     const { session, approval } = item;
     setHiddenApprovalIds((current) => new Set(current).add(approval.id));
     setDecisionErrors((current) => {
@@ -581,11 +605,12 @@ export function AgentHub() {
             <div className="sheet-handle" />
             <h2>Connection</h2>
             <div className="setting-row"><span>Status</span><strong className={`conn-text ${connection}`}>{connection === 'connected' ? 'Connected' : connection === 'offline' ? 'Offline' : 'Connecting'}</strong></div>
-            <div className="setting-row"><span>Using</span><strong>{pairing.url.replace(/^https?:\/\//, '')}</strong></div>
+            <div className="setting-row"><span>Using</span><strong>{pairing.url === pairing.relay ? 'Agent Hub relay' : pairing.url.replace(/^https?:\/\//, '')}</strong></div>
             <div className="setting-note">
-              {candidateUrls(pairingRef.current || pairing).some((item) => /\/\/100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(item))
+              {pairing.relay ? 'Away from home, Agent Hub can connect through the relay while your PC is online.'
+                : candidateUrls(pairingRef.current || pairing).some((item) => /\/\/100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(item))
                 ? 'Tailscale is set up, so this also works away from home.'
-                : 'Away from home: install Tailscale on this phone and your PC, sign in to the same account, then open this app once at home.'}
+                : 'Remote access is not configured. Set up the Agent Hub relay on your PC to connect away from home.'}
             </div>
             <button className="sheet-btn danger" onClick={() => void disconnect()}><LogOut size={18} /> Disconnect this phone</button>
             <button className="sheet-btn" onClick={() => setSettingsOpen(false)}>Close</button>
@@ -919,16 +944,15 @@ function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing
     if (!pair) { setError('That pairing link is not valid.'); return; }
     setConnecting(true);
     try {
-      let working: string | undefined;
-      for (const candidate of candidateUrls(pair)) {
-        if (await reachable(candidate, pair.token, 8000)) { working = candidate; break; }
-      }
+      const working = await findReachable(pair, (address, relay) => reachable(address, pair.token, pair.relay && !relay ? 4000 : 8000, relay));
       if (!working) throw new Error();
-      const next = { ...pair, url: working };
+      const next = { ...pair, url: working, urls: pair.urls ?? [pair.url] };
       await savePairing(next);
       onPaired(next);
     } catch {
-      setError(`Can't reach ${pair.url}. Is the phone on the same Wi-Fi as the PC, and is Agent Hub running?`);
+      setError(pair.relay
+        ? "Can't reach your PC. Check that Agent Hub is running and that your PC and phone are online."
+        : `Can't reach ${pair.url}. Is the phone on the same Wi-Fi as the PC, and is Agent Hub running?`);
     } finally { setConnecting(false); }
   }
 
@@ -1095,7 +1119,7 @@ function groupMessages(messages: SessionMessage[]): Array<ChatItem | ToolGroup> 
   return output;
 }
 
-export function ChatView({ session, pairing, onBack }: { session: AgentSession; pairing: PairingDetails; onBack: () => void }) {
+export function ChatView({ session, pairing, onBack, online = true }: { session: AgentSession; pairing: PairingDetails; onBack: () => void; online?: boolean }) {
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState('');
@@ -1108,11 +1132,12 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
   const canReply = Boolean((session as AgentSession & { canReply?: boolean }).canReply);
 
   const load = useCallback(async () => {
+    if (!online) return;
     try {
       const response = await fetch(`${pairing.url}/api/sessions/${encodeURIComponent(session.id)}/messages?limit=100`, { headers: { Authorization: `Bearer ${pairing.token}` } });
       if (response.ok) setMessages(await response.json() as SessionMessage[]);
     } catch { /* Keep the last transcript while offline. */ } finally { setLoading(false); }
-  }, [pairing.url, pairing.token, session.id]);
+  }, [online, pairing.url, pairing.token, session.id]);
 
   useEffect(() => {
     void load();
@@ -1136,7 +1161,7 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
 
   async function send() {
     const text = draft.trim();
-    if (!text || sending) return;
+    if (!online || !text || sending) return;
     setSending(true);
     setSendError('');
     const optimisticMessage = { role: 'user' as const, text, at: new Date().toISOString() };
@@ -1163,7 +1188,7 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
   }
 
   async function stopReply() {
-    if (stopping) return;
+    if (!online || stopping) return;
     setStopping(true);
     setSendError('');
     try {
@@ -1222,7 +1247,7 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
       </div>
 
       {(session.approvals || (session.approval ? [session.approval] : [])).map((approval) => (
-        <ApprovalCard key={approval.id} session={session} approval={approval} pairing={pairing} />
+        <ApprovalCard key={approval.id} session={session} approval={approval} pairing={pairing} online={online} />
       ))}
       {canReply || session.replyRunning ? (
         <footer className="composer">
@@ -1233,14 +1258,14 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
             <div className="composer-box">
               <textarea value={draft} rows={1} placeholder={`Message ${agentLabels[session.agent]}`}
                 onChange={(event) => { setDraft(event.target.value); event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`; }} />
-              <button className="send" aria-label="Send" disabled={!draft.trim() || sending} onClick={() => void send()}>
+              <button className="send" aria-label="Send" disabled={!online || !draft.trim() || sending} onClick={() => void send()}>
                 {sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={20} />}
               </button>
             </div>
           )}
           {session.replyRunning && (
             <button className="secondary danger stop-reply" type="button" aria-label="Stop reply"
-              disabled={stopping} onClick={() => void stopReply()}>
+              disabled={!online || stopping} onClick={() => void stopReply()}>
               {stopping ? 'Stopping…' : 'Stop'}
             </button>
           )}
@@ -1256,7 +1281,7 @@ export function ChatView({ session, pairing, onBack }: { session: AgentSession; 
   );
 }
 
-function ApprovalCard({ session, approval, pairing }: { session: AgentSession; approval: PendingApproval; pairing: PairingDetails }) {
+function ApprovalCard({ session, approval, pairing, online }: { session: AgentSession; approval: PendingApproval; pairing: PairingDetails; online: boolean }) {
   const [busy, setBusy] = useState<'allow' | 'deny' | undefined>();
   const [error, setError] = useState('');
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
@@ -1264,7 +1289,7 @@ function ApprovalCard({ session, approval, pairing }: { session: AgentSession; a
   const answersComplete = questions.every((question) => (answers[question.question]?.length ?? 0) > 0);
   useEffect(() => { setBusy(undefined); setError(''); setAnswers({}); }, [approval.id]);
   async function decide(decision: 'allow' | 'deny', answerMap?: Record<string, string>) {
-    if (busy) return;
+    if (!online || busy) return;
     setBusy(decision);
     setError('');
     const error = await sendDecision(pairing, session.id, approval.id, decision, answerMap);
@@ -1330,10 +1355,10 @@ function ApprovalCard({ session, approval, pairing }: { session: AgentSession; a
       ))}
       {error && <div className="alert small">{error}</div>}
       <div className="approval-actions">
-        <button className="secondary deny" disabled={Boolean(busy)} onClick={() => void decide('deny')}>
+        <button className="secondary deny" disabled={!online || Boolean(busy)} onClick={() => void decide('deny')}>
           {busy === 'deny' ? <LoaderCircle className="spin" size={18} /> : <X size={18} />} Deny
         </button>
-        <button className="primary allow" disabled={Boolean(busy) || (questions.length > 0 && !answersComplete)} onClick={() => {
+        <button className="primary allow" disabled={!online || Boolean(busy) || (questions.length > 0 && !answersComplete)} onClick={() => {
           if (!questions.length) { void decide('allow'); return; }
           void decide('allow', Object.fromEntries(questions.map((question) => [
             question.question, (answers[question.question] ?? []).join(', '),

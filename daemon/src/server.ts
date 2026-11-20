@@ -18,6 +18,7 @@ import { cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError, wa
 import { NtfyNotifier } from './notifications.js';
 import { ApprovalBroker, hookDecisionBody, type ApprovalDecision } from './approvals.js';
 import { defaultApprovalHoldSeconds } from './claude-hooks.js';
+import { connectRelay, relayBaseUrl } from './relay.js';
 
 export interface HubRuntime {
   app: FastifyInstance;
@@ -273,6 +274,7 @@ export function createHub(
   app.get('/api/pair', async () => ({
     urls: lanUrls(config.port),
     token: config.token,
+    ...(config.relay ? { relay: relayBaseUrl(config.relay) } : {}),
   }));
   app.get('/api/events', async (request, reply) => {
     reply.hijack();
@@ -416,8 +418,15 @@ export function createHub(
 export async function startServer(config: HubConfig): Promise<HubRuntime> {
   if (!config.devinApiKey) console.warn('Devin: no API key; run agent-hub config set devinApiKey <key>');
   const runtime = createHub(config);
+  let disconnect: (() => void) | undefined;
+  runtime.app.addHook('onClose', async () => { disconnect?.(); });
   await runtime.ready;
   await runtime.app.listen({ host: config.host, port: config.port });
+  const address = runtime.app.server.address();
+  if (config.relay && address && typeof address !== 'string') {
+    const local = address.address === '0.0.0.0' ? '127.0.0.1' : address.address === '::' ? '::1' : address.address;
+    disconnect = connectRelay(config.relay, `http://${local.includes(':') ? `[${local}]` : local}:${address.port}`, config.token);
+  }
   console.log(`Agent Hub listening on ${config.host}:${config.port}`);
   return runtime;
 }

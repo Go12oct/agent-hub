@@ -46,6 +46,8 @@ jobs:
       - run: npm ci
       - run: npm run build:web
       - run: npm run build:daemon
+        env:
+          AGENT_HUB_DEFAULT_RELAY_URL: ${{ vars.AGENT_HUB_DEFAULT_RELAY_URL }}
       - name: Build Windows executable
         continue-on-error: true
         run: node daemon/scripts/build-sea.mjs

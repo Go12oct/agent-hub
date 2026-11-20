@@ -5,17 +5,18 @@
   "workspaces": [
     "packages/shared",
     "daemon",
-    "app"
+    "app",
+    "relay"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p daemon/tsconfig.json && tsc --noEmit -p app/tsconfig.json",
+    "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p daemon/tsconfig.json && tsc --noEmit -p app/tsconfig.json && tsc --noEmit -p relay/tsconfig.json",
     "test": "vitest run",
     "build:web": "npm run build -w app && node scripts/copy-web.mjs",
     "build:daemon": "npm run build -w daemon",
-    "build": "npm run build:web && npm run build:daemon"
+    "build": "npm run build:web && npm run build:daemon && npm run build -w relay"
   },
   "dependencies": {
     "@capacitor/android": "^7.2.0",

@@ -1,10 +1,29 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/config';
+import { describe, expect, it, vi } from 'vitest';
+import { loadConfig, setConfigValue } from '../src/config';
 
 describe('configuration', () => {
+  it('keeps the relay identity across loads and accepts HTTPS only', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-relay-config-'));
+    vi.stubEnv('AGENT_HUB_CONFIG_DIR', directory);
+    vi.stubEnv('AGENT_HUB_RELAY_URL', undefined);
+    try {
+      expect((await loadConfig()).relay).toBeUndefined();
+      await setConfigValue('relayUrl', 'https://relay.example.test');
+      const [first, second] = await Promise.all([loadConfig(), loadConfig()]);
+      expect(first.relay).toEqual({ origin: 'https://relay.example.test', secret: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(second.relay).toEqual(first.relay);
+      vi.stubEnv('AGENT_HUB_RELAY_URL', 'http://relay.example.test');
+      await expect(loadConfig()).rejects.toThrow('HTTPS origin');
+      vi.stubEnv('AGENT_HUB_RELAY_URL', 'false');
+      expect((await loadConfig()).relay).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('loads Devin v3 credentials from environment overrides', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-config-'));
     const previous = {
