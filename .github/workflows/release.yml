@@ -49,6 +49,47 @@ jobs:
       - name: Build Windows executable
         continue-on-error: true
         run: node daemon/scripts/build-sea.mjs
+      - name: Check Windows signing configuration
+        id: windows-signing
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          if (-not (Test-Path 'daemon/dist/agent-hub.exe')) {
+            Write-Output '::warning::Skipping Windows signing: agent-hub.exe is missing.'
+            'enabled=false' >> $env:GITHUB_OUTPUT
+          } elseif (-not $env:ES_USERNAME -or -not $env:ES_PASSWORD -or -not $env:ES_CREDENTIAL_ID -or -not $env:ES_TOTP_SECRET) {
+            Write-Output '::warning::Skipping Windows signing: one or more eSigner repository secrets are missing.'
+            'enabled=false' >> $env:GITHUB_OUTPUT
+          } else {
+            'enabled=true' >> $env:GITHUB_OUTPUT
+          }
+      - name: Sign Windows executable
+        if: steps.windows-signing.outputs.enabled == 'true'
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/daemon/dist/agent-hub.exe
+          override: true
+          clean_logs: true
+      - name: Verify Windows executable signature
+        if: steps.windows-signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature -LiteralPath 'daemon/dist/agent-hub.exe'
+          if ($signature.Status -ne 'Valid') {
+            throw "Windows executable signature is not valid: $($signature.Status)"
+          }
+          if (-not $signature.TimeStamperCertificate) {
+            throw 'Windows executable signature is missing a timestamp.'
+          }
       - name: Assemble Windows package
         shell: pwsh
         run: ./scripts/build-windows-package.ps1

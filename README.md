@@ -35,6 +35,9 @@ that the ZIP came from this project's release page before choosing Run. If start
 fails, the installer stays open with an error and the daemon log location
 (`%LOCALAPPDATA%\agent-hub\agent-hub.log` by default).
 
+Release maintainers: see [Windows code signing](docs/windows-code-signing.md)
+for optional signed executable setup and SmartScreen limitations.
+
 The daemon's configuration and random access token are stored in
 `%APPDATA%\agent-hub\config.json`. Keep this file private. The token is never
 printed by the daemon or included in routine logs; the pairing QR code
