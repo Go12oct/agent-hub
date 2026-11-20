@@ -973,7 +973,11 @@ function Setup({ link, onPaired, onCancel }: { link?: string; onPaired: (pairing
       const { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } = await import('@capacitor/barcode-scanner');
       const result = await CapacitorBarcodeScanner.scanBarcode({ hint: CapacitorBarcodeScannerTypeHint.QR_CODE, scanInstructions: 'Scan the QR code shown on your PC' });
       if (result.ScanResult) { setPairInput(result.ScanResult); await connect(result.ScanResult); }
-    } catch { setError('Could not open the camera. Paste the pairing link instead.'); setManual(true); }
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'OS-PLUG-BARC-0006') return;
+      setError('Could not open the camera. Paste the pairing link instead.');
+      setManual(true);
+    }
   }
 
   return (

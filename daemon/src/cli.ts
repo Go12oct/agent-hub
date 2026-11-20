@@ -7,6 +7,7 @@ import path from 'node:path';
 import { isSea } from 'node:sea';
 import qrcode from 'qrcode-terminal';
 import { format } from 'node:util';
+import packageJson from '../package.json' with { type: 'json' };
 import { loadConfig, setConfigValue, configDirectory } from './config.js';
 import { installClaudeHooks, uninstallClaudeHooks } from './claude-hooks.js';
 import { installCodexHooks, uninstallCodexHooks } from './codex-hooks.js';
@@ -69,7 +70,9 @@ async function run(): Promise<void> {
     }
   }
   const [command = 'start', ...args] = process.argv.slice(2);
-  if (command === 'start') {
+  if (command === '--version' || command === '-v') {
+    console.log(packageJson.version);
+  } else if (command === 'start') {
     await enableFileLogging();
     const config = await loadConfig();
     const runtime = await startServer(config);
@@ -200,7 +203,7 @@ async function run(): Promise<void> {
     }
   } else {
     console.log(`Agent Hub CLI
-Usage: agent-hub [start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-codex-hooks|uninstall-codex-hooks|hook-bridge codex|install-service|uninstall-service|config set <key> <value>]
+Usage: agent-hub [--version|-v|start|pair [--url <url>]|firewall|install-claude-hooks|uninstall-claude-hooks|install-codex-hooks|uninstall-codex-hooks|hook-bridge codex|install-service|uninstall-service|config set <key> <value>]
 Config directory: ${configDirectory()}`);
   }
 }
