@@ -29,7 +29,7 @@ jobs:
             if [[ "$TAG" == *-* ]]; then
               prerelease+=(--prerelease)
             fi
-            gh release create "$TAG" --title "Agent Hub $TAG" --generate-notes --draft "${prerelease[@]}"
+            gh release create "$TAG" --title "Agent Hub $TAG" --generate-notes --notes "Code signing policy: https://github.com/${{ github.repository }}/#code-signing-policy" --draft "${prerelease[@]}"
           fi
 
   windows:
