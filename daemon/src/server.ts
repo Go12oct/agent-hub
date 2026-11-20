@@ -1,77 +1,191 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentSession, SessionMessage } from '@agent-hub/shared';
-import type { Collector } from './collectors/types.js';
+import { agentLabels, type AgentSession, type SessionMessage } from '@agent-hub/shared';
+import type { Collector, EmitSession } from './collectors/types.js';
 import { ClaudeCollector, type ClaudeHookPayload } from './collectors/claude.js';
-import { CodexCollector } from './collectors/codex.js';
+import { CodexCollector, type CodexHookPayload } from './collectors/codex.js';
 import { AntigravityCollector } from './collectors/antigravity.js';
 import { DevinCollector } from './collectors/devin.js';
+import { DevinLocalCollector } from './collectors/devin-local.js';
 import { CodexCloudCollector } from './collectors/codex-cloud.js';
 import type { HubConfig } from './config.js';
+import { cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError, warnLocalReplyFailure, type ReplyAgent, type ReplyRunner } from './local-replies.js';
 import { NtfyNotifier } from './notifications.js';
+import { ApprovalBroker, hookDecisionBody, type ApprovalDecision } from './approvals.js';
+import { defaultApprovalHoldSeconds } from './claude-hooks.js';
 
 export interface HubRuntime {
   app: FastifyInstance;
   sessions: Map<string, AgentSession>;
   collectors: Collector[];
+  ready: Promise<void>;
   close(): Promise<void>;
 }
 
-function authorized(request: any, token: string): boolean {
+function authorized(request: any, token: string, allowQuery = true): boolean {
   const header = request.headers.authorization;
   const supplied = typeof header === 'string' && header.startsWith('Bearer ')
     ? header.slice(7)
-    : typeof request.query?.token === 'string' ? request.query.token : '';
+    : allowQuery && typeof request.query?.token === 'string' ? request.query.token : '';
   const expectedBuffer = Buffer.from(token);
   const suppliedBuffer = Buffer.from(supplied);
   return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer);
 }
 
-function lanUrls(port: number): string[] {
-  const addresses = new Set<string>();
-  for (const interfaces of Object.values(os.networkInterfaces())) {
+export function lanUrls(port: number, networkInterfaces = os.networkInterfaces()): string[] {
+  const priorities = new Map<string, { priority: number; order: number }>();
+  let order = 0;
+  for (const [name, interfaces] of Object.entries(networkInterfaces)) {
     for (const address of interfaces || []) {
-      if (address.family === 'IPv4' && !address.internal && !address.address.startsWith('169.254.')) addresses.add(address.address);
+      if (address.family !== 'IPv4' || address.internal || address.address.startsWith('169.254.')) continue;
+      const [first, second] = address.address.split('.').map(Number);
+      const tailscale = first === 100 && second !== undefined && second >= 64 && second <= 127;
+      const virtualAdapter = /vethernet|virtual|vmware|vbox|virtualbox|hyper-v|wsl|docker|bluetooth|loopback|local area connection\*/i.test(name);
+      const hotspotAddress = address.address.startsWith('192.168.137.');
+      const preferredAdapter = /wi-?fi|wlan|wireless|^en|^eth|ethernet/i.test(name);
+      const priority = virtualAdapter || hotspotAddress ? 3 : preferredAdapter ? 0 : tailscale ? 1 : 2;
+      const previous = priorities.get(address.address);
+      if (!previous || priority < previous.priority) priorities.set(address.address, { priority, order });
+      order += 1;
     }
   }
-  return [...addresses].map((address) => `http://${address}:${port}`);
+  return [...priorities.entries()]
+    .sort(([, left], [, right]) => left.priority - right.priority || left.order - right.order)
+    .map(([address]) => `http://${address}:${port}`);
 }
 
-export function createHub(config: HubConfig, options: { collectors?: Collector[]; staticDir?: string } = {}): HubRuntime {
-  const app = Fastify({ logger: false });
+function isReplyAgent(agent: AgentSession['agent']): agent is ReplyAgent {
+  return agent === 'codex' || agent === 'claude-code' || agent === 'antigravity' || agent === 'devin';
+}
+
+export function createHub(
+  config: HubConfig,
+  options: { collectors?: Collector[]; staticDir?: string; replyRunner?: ReplyRunner } = {},
+): HubRuntime {
+  const app = Fastify({ logger: false, forceCloseConnections: true });
   const sessions = new Map<string, AgentSession>();
-  const claude = new ClaudeCollector(config.lookbackDays);
-  const collectors = options.collectors || [
-    new CodexCollector(config.lookbackDays),
+  const approvalHoldMs = Math.max(1, config.approvals?.holdSeconds ?? defaultApprovalHoldSeconds) * 1000;
+  const devinV3 = config.devinPat && config.devinOrgId
+    ? { pat: config.devinPat, orgId: config.devinOrgId }
+    : undefined;
+  const codex = new CodexCollector(config.lookbackDays, approvalHoldMs);
+  const claude = new ClaudeCollector({ days: config.lookbackDays, approvalHoldMs });
+  const collectors: Collector[] = options.collectors || [
+    codex,
     claude,
     new AntigravityCollector(config.lookbackDays),
-    ...(config.devinApiKey ? [new DevinCollector(config.devinApiKey)] : []),
+    new DevinLocalCollector(),
+    ...(config.devinApiKey || devinV3 ? [new DevinCollector(config.devinApiKey, undefined, devinV3)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];
+  const replyRunner = options.replyRunner ?? (config.localReplies?.enabled === false ? undefined : new LocalReplyRunner({
+    commands: {
+      codex: config.localReplies?.codex,
+      'claude-code': config.localReplies?.claude,
+      antigravity: config.localReplies?.agy,
+    },
+  }));
+  const collectorForSession = (session: AgentSession): Collector | undefined => session.id.startsWith('devin-local:')
+    ? collectors.find((collector) => collector.name === 'devin-local')
+    : collectors.find((collector) => collector.name === session.agent);
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
-  const eventClients = new Set<{ write: (data: string) => void }>();
+  const approvals = new ApprovalBroker();
+  const approvalsEnabled = config.approvals?.enabled !== false;
+  const eventClients = new Set<{ write: (data: string) => void; end: () => void }>();
+  let closePromise: Promise<void> | undefined;
+  const closeRuntime = (): Promise<void> => {
+    if (!closePromise) {
+      closePromise = (async () => {
+        for (const client of eventClients) client.end();
+        eventClients.clear();
+        approvals.cancelAll();
+        await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
+        await app.close();
+      })();
+    }
+    return closePromise;
+  };
 
+  const present = (session: AgentSession): AgentSession => {
+    const failure = replyRunner?.failure(session.id);
+    const pendingById = new Map(approvals.pending(session.id).map((item) => [item.id, item]));
+    for (const item of session.approvals ?? (session.approval ? [session.approval] : [])) {
+      pendingById.set(item.id, item);
+    }
+    const pending = [...pendingById.values()];
+    const approval = pending[0];
+    const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
+    const isReplyRunning = Boolean(replyRunner?.isRunning(session.id));
+    const replyRunning = Boolean(replyRunner?.canStop?.(session.id));
+    const presentedSession = { ...session };
+    delete presentedSession.replyRunning;
+    return {
+      ...presentedSession,
+      ...(approval ? { approval, approvals: pending, status: 'needs_input' as const, lastMessage: approval.summary } : {}),
+      canReply: session.agent === 'devin'
+        ? isLocalDevin
+          ? Boolean(replyRunner?.canReplyTo?.(session))
+          : Boolean(session.canReply && collectorForSession(session)?.sendMessage)
+        : isReplyAgent(session.agent) && Boolean(
+          replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
+        ),
+      ...(replyRunning ? { replyRunning: true } : {}),
+      replyError: failure && Date.parse(failure.at) >= Date.parse(session.updatedAt) ? failure.error : undefined,
+      ...(approval ? {} : { status: isReplyRunning ? 'working' as const : session.status }),
+    };
+  };
+  const broadcast = (session: AgentSession) => {
+    const data = JSON.stringify(present(session));
+    for (const client of eventClients) client.write(`event: upsert\ndata: ${data}\n\n`);
+  };
   const emit: import('./collectors/types.js').EmitSession = (session) => {
     sessions.set(session.id, session);
-    void notifier.update(session);
-    const data = JSON.stringify(session);
-    for (const client of eventClients) client.write(`event: upsert\ndata: ${data}\n\n`);
+    void notifier.update(present(session));
+    broadcast(session);
+  };
+  approvals.onChange = (id) => {
+    const session = sessions.get(id);
+    if (!session) return;
+    void notifier.update(present(session));
+    broadcast(session);
   };
   emit.remove = (id) => {
     sessions.delete(id);
     for (const client of eventClients) client.write(`event: remove\ndata: ${JSON.stringify({ id })}\n\n`);
   };
+  if (replyRunner) {
+    const previousOnChange = replyRunner.onChange;
+    replyRunner.onChange = (id) => {
+      previousOnChange?.(id);
+      const session = sessions.get(id);
+      if (session) broadcast(session);
+    };
+  }
   for (const collector of collectors) {
     collector.start(emit);
   }
+  console.log(`Collectors started: ${collectors.map((collector) => collector.name).join(', ')}`);
+  const ready = replyRunner?.init
+    ? replyRunner.init().then(() => {
+      for (const session of sessions.values()) broadcast(session);
+    })
+    : Promise.resolve();
 
   app.register(cors, { origin: true, credentials: false });
-  app.get('/health', async () => ({ ok: true }));
+  app.get<{ Querystring: { nonce?: string } }>('/health', async (request, reply) => {
+    const nonce = request.query.nonce;
+    if (nonce === undefined) return { ok: true, service: 'agent-hub' };
+    if (typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(nonce)) {
+      return reply.code(400).send({ error: 'Invalid nonce' });
+    }
+    const proof = createHmac('sha256', config.token).update(nonce).digest('hex');
+    return { ok: true, service: 'agent-hub', proof };
+  });
   app.addHook('preHandler', async (request, reply) => {
     if (request.url.startsWith('/api/') && !authorized(request, config.token)) {
       return reply.code(401).send({ error: 'Unauthorized' });
@@ -79,19 +193,82 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     if (request.url.startsWith('/hooks/claude') && !authorized(request, config.token)) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
+    if (request.url.startsWith('/hooks/codex') && !authorized(request, config.token, false)) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
   });
-  app.get('/api/sessions', async () => [...sessions.values()].sort((a, b) => {
+  app.post('/api/shutdown', async (request, reply) => {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.ip)) {
+      return reply.code(403).send({ error: 'Shutdown is only available on the local machine' });
+    }
+    reply.raw.once('finish', () => {
+      setTimeout(() => { void closeRuntime(); }, 50).unref();
+    });
+    return reply.code(202).send({ ok: true });
+  });
+  app.get('/api/sessions', async () => [...sessions.values()].map(present).sort((a, b) => {
     const rank = (status: AgentSession['status']) => status === 'needs_input' ? 0 : status === 'working' ? 1 : 2;
     return rank(a.status) - rank(b.status) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
   }));
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/reply/stop', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    if (!replyRunner?.stop?.(session.id)) {
+      return reply.code(409).send({ error: 'Nothing is running in this chat' });
+    }
+    replyRunner.onChange?.(session.id);
+    return reply.code(200).send({ stopped: true });
+  });
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>('/api/sessions/:id/messages', async (request, reply) => {
     const id = request.params.id;
     const session = sessions.get(id);
     if (!session) return reply.code(404).send({ error: 'Session not found' });
-    const collector = collectors.find((item) => item.name === session.agent);
+    const collector = collectorForSession(session);
     const limit = Math.max(1, Math.min(100, Number(request.query.limit) || 30));
     const messages: SessionMessage[] = collector ? await collector.getMessages(session.nativeId, limit) : [];
     return messages;
+  });
+  app.post<{ Params: { id: string }; Body: { text?: unknown } }>('/api/sessions/:id/messages', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    if (approvals.pending(session.id).length) {
+      return reply.code(409).send({ error: 'Answer the request in this chat first.' });
+    }
+    const collector = collectorForSession(session);
+    const isLocalDevin = session.agent === 'devin' && session.id.startsWith('devin-local:');
+    const isDevinReply = session.agent === 'devin' && !isLocalDevin && Boolean(session.canReply && collector?.sendMessage);
+    const isLocalReply = isReplyAgent(session.agent)
+      && (session.agent !== 'devin' || isLocalDevin)
+      && Boolean(
+        replyRunner?.canReplyTo?.(session) ?? replyRunner?.supports(session.agent),
+      );
+    if (session.agent === 'antigravity' && replyRunner?.canReplyTo && !isLocalReply) {
+      return reply.code(405).send({ error: 'Antigravity can only continue chats started with the agy CLI' });
+    }
+    if (!isDevinReply && !isLocalReply) {
+      return reply.code(405).send({ error: 'Replies are not supported for this agent' });
+    }
+    const text = request.body?.text;
+    if (typeof text !== 'string' || text.length < 1 || text.length > 10_000) {
+      return reply.code(400).send({ error: 'text must be between 1 and 10000 characters' });
+    }
+    try {
+      if (isDevinReply) {
+        await collector!.sendMessage!(session.nativeId, text);
+        return reply.code(204).send();
+      }
+      await replyRunner!.send(session, text);
+      return reply.code(202).send({ ok: true });
+    } catch (error) {
+      if (error instanceof ReplyBusyError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (isDevinReply) return reply.code(502).send({ error: 'Failed to send reply' });
+      const rawMessage = error instanceof ReplyFailedError ? error.stderrTail || error.message : error instanceof Error ? error.message : '';
+      const message = cleanReplyError(rawMessage) || `Failed to start ${agentLabels[session.agent]}`;
+      warnLocalReplyFailure(session.agent, session.id, message);
+      return reply.code(502).send({ error: message });
+    }
   });
   app.get('/api/pair', async () => ({
     urls: lanUrls(config.port),
@@ -105,19 +282,118 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
       Connection: 'keep-alive',
       'Access-Control-Allow-Origin': '*',
     });
-    const client = { write: (data: string) => reply.raw.write(data) };
+    const client = {
+      write: (data: string) => reply.raw.write(data),
+      end: () => reply.raw.end(),
+    };
     eventClients.add(client);
-    client.write(`event: snapshot\ndata: ${JSON.stringify([...sessions.values()])}\n\n`);
+    client.write(`event: snapshot\ndata: ${JSON.stringify([...sessions.values()].map(present))}\n\n`);
     const heartbeat = setInterval(() => client.write(': heartbeat\n\n'), 20_000);
     reply.raw.on('close', () => {
       clearInterval(heartbeat);
       eventClients.delete(client);
     });
   });
-  app.post<{ Body: Record<string, unknown> }>('/hooks/claude', async (request) => {
-    await claude.applyHook((request.body || {}) as ClaudeHookPayload, emit);
-    return { ok: true };
+  app.post<{ Params: { id: string }; Body: { decision?: unknown; approvalId?: unknown; answers?: unknown } }>('/api/sessions/:id/approval', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    const decision = request.body?.decision;
+    if (decision !== 'allow' && decision !== 'deny') {
+      return reply.code(400).send({ error: 'decision must be "allow" or "deny"' });
+    }
+    const approvalId = typeof request.body?.approvalId === 'string' ? request.body.approvalId : undefined;
+    const pendingById = new Map(approvals.pending(session.id).map((item) => [item.id, item]));
+    for (const item of session.approvals ?? (session.approval ? [session.approval] : [])) {
+      pendingById.set(item.id, item);
+    }
+    const pending = [...pendingById.values()];
+    const target = approvalId ? pending.find((item) => item.id === approvalId) : pending[0];
+    if (target?.readOnly) return reply.code(409).send({ error: 'Answer this in Devin' });
+    let answers: Record<string, string> | undefined;
+    if (request.body.answers !== undefined) {
+      if (!request.body.answers || typeof request.body.answers !== 'object' || Array.isArray(request.body.answers)) {
+        return reply.code(400).send({ error: 'answers must be an object of question text to answer strings' });
+      }
+      const entries = Object.entries(request.body.answers as Record<string, unknown>);
+      if (entries.some(([question, answer]) => !question.trim() || typeof answer !== 'string')) {
+        return reply.code(400).send({ error: 'answers must be an object of question text to answer strings' });
+      }
+      answers = Object.fromEntries(entries) as Record<string, string>;
+    }
+    if (decision === 'allow' && target?.toolName === 'AskUserQuestion') {
+      const questions = target.questions ?? [];
+      if (!questions.length || questions.some((question) => !answers?.[question.question]?.trim())) {
+        return reply.code(400).send({ error: 'An answer is required for every question' });
+      }
+    }
+    const result = approvals.decide(session.id, approvalId, decision as ApprovalDecision, answers);
+    if (result === 'none') return reply.code(409).send({ error: 'That request is no longer waiting. It may have been answered on the PC.' });
+    if (result === 'stale') return reply.code(409).send({ error: 'A newer request replaced this one. Check the chat again.' });
+    return reply.code(204).send();
   });
+  interface HookPayload {
+    session_id?: string;
+    hook_event_name?: string;
+    cwd?: string;
+    message?: string;
+    tool_name?: unknown;
+    tool_input?: unknown;
+  }
+  const registerHookHandler = (
+    route: string,
+    sessionPrefix: string,
+    cancelEvents: string[],
+    applyHook: (payload: HookPayload, emit: EmitSession) => Promise<void>,
+    clearNeedsInput: (sessionId: string, emit: EmitSession) => Promise<void>,
+  ) => {
+    app.post<{ Body: Record<string, unknown> }>(route, async (request, reply) => {
+      const payload = (request.body || {}) as HookPayload;
+      if (!payload.session_id) {
+        await applyHook(payload, emit);
+        return { ok: true };
+      }
+      const sessionId = `${sessionPrefix}:${payload.session_id}`;
+      const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
+      const toolInput = payload.tool_input && typeof payload.tool_input === 'object'
+        ? payload.tool_input as Record<string, unknown>
+        : undefined;
+      if (payload.hook_event_name !== 'PermissionRequest' || !approvalsEnabled) {
+        await applyHook(payload, emit);
+        if (['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(payload.hook_event_name || '') && toolName) {
+          approvals.cancelSession(sessionId, { name: toolName, input: toolInput });
+        } else if (cancelEvents.includes(payload.hook_event_name || '')) {
+          approvals.cancelSession(sessionId);
+        }
+        return { ok: true };
+      }
+      const { approval, outcome } = approvals.hold(sessionId, toolName || 'a tool', toolInput, approvalHoldMs);
+      reply.raw.once('close', () => { if (!reply.raw.writableFinished) approvals.cancel(approval.id); });
+      await applyHook(payload, emit);
+      const resolution = await outcome;
+      const result = resolution.outcome;
+      if (result === 'allow' || result === 'deny') {
+        await applyHook({ session_id: payload.session_id, hook_event_name: 'PreToolUse', cwd: payload.cwd }, emit);
+      } else if ((result === 'timeout' || result === 'cancelled') && approvals.pending(sessionId).length === 0) {
+        await clearNeedsInput(sessionId, emit);
+      }
+      const updatedInput = ['AskUserQuestion', 'ExitPlanMode'].includes(resolution.toolName) ? resolution.input : undefined;
+      return hookDecisionBody(result, updatedInput, resolution.answers);
+    });
+  };
+  registerHookHandler(
+    '/hooks/claude',
+    'claude-code',
+    ['UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd'],
+    (payload, sessionEmitter) => claude.applyHook(payload as ClaudeHookPayload, sessionEmitter),
+    (sessionId, sessionEmitter) => claude.clearNeedsInput(sessionId, sessionEmitter),
+  );
+  registerHookHandler(
+    '/hooks/codex',
+    'codex',
+    ['UserPromptSubmit', 'Stop', 'SessionEnd'],
+    (payload, sessionEmitter) => codex.applyHook(payload as CodexHookPayload, sessionEmitter),
+    (sessionId, sessionEmitter) => codex.clearNeedsInput(sessionId, sessionEmitter),
+  );
   const staticCandidates = [
     path.join(path.dirname(path.resolve(process.argv[1] || process.execPath)), 'public'),
     path.join(path.dirname(process.execPath), 'public'),
@@ -132,18 +408,16 @@ export function createHub(config: HubConfig, options: { collectors?: Collector[]
     app,
     sessions,
     collectors,
-    async close() {
-      await Promise.all(collectors.map((collector) => Promise.resolve(collector.stop())));
-      await app.close();
-    },
+    ready,
+    close: closeRuntime,
   };
 }
 
 export async function startServer(config: HubConfig): Promise<HubRuntime> {
+  if (!config.devinApiKey) console.warn('Devin: no API key; run agent-hub config set devinApiKey <key>');
   const runtime = createHub(config);
+  await runtime.ready;
   await runtime.app.listen({ host: config.host, port: config.port });
   console.log(`Agent Hub listening on ${config.host}:${config.port}`);
   return runtime;
 }
-
-export { lanUrls };

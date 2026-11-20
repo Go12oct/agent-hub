@@ -1,7 +1,8 @@
 import path from 'node:path';
-import { stat } from 'node:fs/promises';
+import type { Dirent, Stats } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
-import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent, walkFiles } from './files.js';
+import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
@@ -15,6 +16,21 @@ function antigravityRoots(): string[] {
   ];
 }
 
+function normalizeWatchPath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function cleanUserText(text: string): string {
+  const withoutOpeningTag = text.replace(/^\s*<USER_REQUEST>\s*/i, '');
+  const matches = [...withoutOpeningTag.matchAll(/<\/USER_REQUEST>/gi)];
+  const closingTag = matches.length ? matches[matches.length - 1]!.index! : -1;
+  return (closingTag < 0 ? withoutOpeningTag : withoutOpeningTag.slice(0, closingTag)).trim();
+}
+
+function isSystemMessage(text: string): boolean {
+  return text.trim().startsWith('The following is a <SYSTEM_MESSAGE>');
+}
+
 export function parseAntigravityRecords(records: Record<string, any>[], id: string, modifiedAt: string, now = Date.now()): {
   session: AgentSession;
   messages: SessionMessage[];
@@ -26,19 +42,19 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
   let lastRole: AgentSession['lastRole'];
   let lastMessage: string | undefined;
   let complete = false;
-  let error = false;
+  let lastErrorIndex = -1;
+  let lastActivityIndex = -1;
   let updatedAt = modifiedAt;
   const messages: SessionMessage[] = [];
-  for (const row of records) {
+  for (let index = 0; index < records.length; index++) {
+    const row = records[index]!;
     const kind = String(row.type || row.role || row.event || '').toLowerCase();
     let text = typeof row.text === 'string' ? row.text : textFromContent(row.content ?? row.message?.content) || row.message?.text;
-    if (typeof text === 'string') {
-      text = text.replace(/^<USER_REQUEST>\s*/i, '').replace(/\s*<\/USER_REQUEST>$/i, '');
-    }
     const roleName = String(row.role || row.source || row.message?.role || kind).toLowerCase();
     const role = roleName.includes('user') || roleName.includes('human') ? 'user'
       : roleName.includes('assistant') || roleName.includes('model') || roleName.includes('agent') ? 'assistant'
         : roleName.includes('system') || roleName.includes('tool') ? 'tool' : undefined;
+    if (role === 'user' && typeof text === 'string') text = cleanUserText(text);
     if (typeof row.cwd === 'string') cwd = row.cwd;
     if (typeof row.branch === 'string') branch = row.branch;
     if (row.timestamp || row.created_at || row.at) {
@@ -46,19 +62,34 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       if (Date.parse(at) > Date.parse(updatedAt)) updatedAt = at;
     }
     if (role && typeof text === 'string' && text.trim()) {
-      messages.push(message(text, role, row.timestamp));
-      if (role === 'user' && !title) title = text.trim().slice(0, 180);
-      lastRole = role;
-      lastMessage = text;
-      complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
-        || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
+      if (role === 'tool') {
+        if (!isSystemMessage(text)) complete = false;
+      } else if (!isSystemMessage(text)) {
+        messages.push(message(text, role, row.timestamp));
+        if (role === 'user' && !title) title = text.trim().slice(0, 180);
+        lastRole = role;
+        lastMessage = text;
+        lastActivityIndex = index;
+        complete = role === 'assistant' && (row.turnComplete === true || row.completed === true
+          || String(row.status || '').toUpperCase() === 'DONE' || kind.includes('complete'));
+      }
     }
-    if (/error|abort|failed/.test(kind) || ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase())) error = true;
+    const explicitFailure = ['ERROR', 'FAILED'].includes(String(row.status || '').toUpperCase());
+    const abortOnly = /abort/.test(kind) && !/error|fail/.test(kind) && !explicitFailure;
+    if (abortOnly) {
+      complete = true;
+      lastRole = 'assistant';
+      lastActivityIndex = index;
+    } else if (/error|fail/.test(kind) || explicitFailure) {
+      lastErrorIndex = index;
+    }
     if (/turn[_-]?complete|task[_-]?complete/.test(kind)) {
       complete = true;
       lastRole = 'assistant';
+      lastActivityIndex = index;
     }
   }
+  const error = lastErrorIndex >= 0 && lastErrorIndex >= lastActivityIndex;
   const session = buildSession({
     agent: 'antigravity',
     nativeId: id,
@@ -78,11 +109,68 @@ export class AntigravityCollector extends WatchedCollector {
   private messagesByFile = new Map<string, SessionMessage[]>();
   private transcriptById = new Map<string, string>();
   protected roots(): string[] { return antigravityRoots(); }
+  protected watchTargets(): {
+    paths: string[];
+    depth: number;
+    ignored: (path: string, stats?: Stats) => boolean;
+  } {
+    const roots = this.roots();
+    const brainRoots = roots.map((root) => normalizeWatchPath(path.join(root, 'brain')));
+    return {
+      paths: [
+        ...roots.map((root) => path.join(root, 'conversations')),
+        ...roots.map((root) => path.join(root, 'brain')),
+      ],
+      depth: 3,
+      ignored: (targetPath: string, _stats?: Stats) => {
+        const normalizedPath = normalizeWatchPath(targetPath);
+        for (const brainRoot of brainRoots) {
+          if (normalizedPath === brainRoot) return false;
+          if (!normalizedPath.startsWith(`${brainRoot}/`)) continue;
+          const parts = normalizedPath.slice(brainRoot.length + 1).split('/');
+          const allowed = parts.length === 1
+            || (parts.length === 2 && parts[1] === '.system_generated')
+            || (parts.length === 3 && parts[1] === '.system_generated' && parts[2] === 'logs')
+            || (parts.length === 4 && parts[1] === '.system_generated' && parts[2] === 'logs' && parts[3] === 'transcript.jsonl');
+          return !allowed;
+        }
+        return false;
+      },
+    };
+  }
   constructor(private days = 7) { super(); }
   protected async findFiles(): Promise<string[]> {
     const files: string[] = [];
     for (const root of this.roots()) {
-      files.push(...await walkFiles(root, (file) => file.endsWith('.db') || file.endsWith('.pb') || file.endsWith('transcript.jsonl')));
+      const conversations = path.join(root, 'conversations');
+      let conversationEntries: Dirent[];
+      try { conversationEntries = await readdir(conversations, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        conversationEntries = [];
+      }
+      for (const entry of conversationEntries) {
+        if (entry.isFile() && (entry.name.endsWith('.db') || entry.name.endsWith('.pb'))) {
+          files.push(path.join(conversations, entry.name));
+        }
+      }
+
+      const brain = path.join(root, 'brain');
+      let brainEntries: Dirent[];
+      try { brainEntries = await readdir(brain, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        brainEntries = [];
+      }
+      for (const entry of brainEntries) {
+        if (!entry.isDirectory()) continue;
+        const transcript = path.join(brain, entry.name, '.system_generated', 'logs', 'transcript.jsonl');
+        try {
+          if ((await stat(transcript)).isFile()) files.push(transcript);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
     }
     const recent = new Set(await this.recentFiles(files, this.days));
     const idOf = (file: string) => file.endsWith('transcript.jsonl')
@@ -141,7 +229,8 @@ export class AntigravityCollector extends WatchedCollector {
     return (this.messagesByFile.get(file) || []).slice(-limit);
   }
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
-    const file = this.transcriptById.get(nativeId);
-    return file ? this.messages(file, limit) : [];
+    const file = this.transcriptById.get(nativeId) || this.fileById.get(nativeId);
+    if (!file) return [];
+    return this.messages(file, limit);
   }
 }

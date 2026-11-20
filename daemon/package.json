@@ -1,11 +1,11 @@
 {
   "name": "@agent-hub/daemon",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "type": "module",
   "bin": { "agent-hub": "./dist/agent-hub.cjs" },
   "scripts": {
     "dev": "tsx src/cli.ts start",
-    "build": "esbuild src/cli.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/agent-hub.cjs"
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/agent-hub.cjs && esbuild src/hook-bridge.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/hook-bridge.cjs"
   },
   "dependencies": {
     "@agent-hub/shared": "*",

@@ -9,8 +9,12 @@ export interface HubConfig {
   host: string;
   lookbackDays: number;
   devinApiKey?: string;
-  ntfy?: { server: string; topic: string };
+  devinPat?: string;
+  devinOrgId?: string;
+  ntfy?: { server?: string; topic: string };
+  approvals?: { enabled?: boolean; holdSeconds?: number };
   codexCloud: { enabled: boolean };
+  localReplies?: { enabled?: boolean; codex?: string; claude?: string; agy?: string };
 }
 
 export function configDirectory(): string {
@@ -38,10 +42,13 @@ export async function loadConfig(): Promise<HubConfig> {
       host: '0.0.0.0',
       lookbackDays: 7,
       codexCloud: { enabled: false },
+      localReplies: { enabled: true },
     };
     await writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   }
   if (process.env.DEVIN_API_KEY) config.devinApiKey = process.env.DEVIN_API_KEY;
+  if (process.env.DEVIN_PAT) config.devinPat = process.env.DEVIN_PAT;
+  if (process.env.DEVIN_ORG_ID) config.devinOrgId = process.env.DEVIN_ORG_ID;
   if (process.env.AGENT_HUB_PORT) config.port = Number(process.env.AGENT_HUB_PORT);
   return config;
 }

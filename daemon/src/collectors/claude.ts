@@ -2,23 +2,21 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
 import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
+import { defaultApprovalHoldSeconds } from '../claude-hooks.js';
 import type { EmitSession } from './types.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
+import {
+  activeHookOverride as getActiveHookOverride,
+  hookOverrideForFile,
+  type HookOverride,
+} from './hook-overrides.js';
 
 export function claudeTitle(text: string): string | undefined {
   const clean = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
   if (!clean || /^(<environment_context>|<instructions>)/i.test(clean)) return undefined;
   return clean.slice(0, 180);
-}
-
-export function mapClaudeHook(event: string): SessionStatus | undefined {
-  if (['UserPromptSubmit', 'PreToolUse', 'SubagentStart'].includes(event)) return 'working';
-  if (['Notification', 'Stop', 'PermissionRequest'].includes(event)) return 'needs_input';
-  if (event === 'StopFailure') return 'error';
-  if (event === 'SessionEnd') return 'done';
-  return undefined;
 }
 
 export interface ClaudeHookPayload {
@@ -27,11 +25,54 @@ export interface ClaudeHookPayload {
   cwd?: string;
   transcript_path?: string;
   message?: string;
+  error?: string;
   notification_type?: string;
 }
 
-export function claudeHookOverride(fileModifiedAt: number, status: SessionStatus, hookAt: number): SessionStatus | undefined {
-  return fileModifiedAt <= hookAt ? status : undefined;
+export function mapClaudeHook(event: string, payload: ClaudeHookPayload = {}): SessionStatus | undefined {
+  if (['UserPromptSubmit', 'PreToolUse', 'SubagentStart'].includes(event)) return 'working';
+  if (event === 'PermissionRequest') return 'needs_input';
+  if (event === 'Notification') {
+    const needsInput = ['permission_prompt', 'elicitation_dialog'].includes(payload.notification_type || '')
+      || (!payload.notification_type && /permission|approve|allow/i.test(payload.message || ''));
+    return needsInput ? 'needs_input' : 'done';
+  }
+  if (event === 'Stop') return 'done';
+  if (event === 'StopFailure') return 'error';
+  if (event === 'SessionEnd') return 'done';
+  return undefined;
+}
+
+export function claudeHookOverride(
+  fileModifiedAt: number,
+  status: SessionStatus,
+  hookAt: number,
+  now = Date.now(),
+  approvalHoldMs = defaultApprovalHoldSeconds * 1000,
+  hookEvent?: string,
+): SessionStatus | undefined {
+  return hookOverrideForFile(fileModifiedAt, {
+    status,
+    at: hookAt,
+    event: hookEvent || '',
+  }, now, approvalHoldMs)?.status;
+}
+
+function isApiErrorMessage(text: string): boolean {
+  return /^\s*API Error\s*:/i.test(text);
+}
+
+function errorText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (value && typeof value === 'object' && 'message' in value) {
+    return errorText((value as { message?: unknown }).message);
+  }
+  return undefined;
+}
+
+function formatErrorMessage(text?: string): string | undefined {
+  const trimmed = text?.trim();
+  return trimmed ? `Error: ${trimmed}`.slice(0, 280) : undefined;
 }
 
 export function parseClaudeRecords(
@@ -48,6 +89,7 @@ export function parseClaudeRecords(
   let updatedAt = fileModifiedAt;
   let lastRole: AgentSession['lastRole'];
   let lastMessage: string | undefined;
+  let lastErrorMessage: string | undefined;
   let complete = false;
   let errored = false;
   for (const row of records) {
@@ -56,12 +98,23 @@ export function parseClaudeRecords(
     const role = row.type === 'user' || row.type === 'assistant' ? row.type : row.message?.role;
     const content = row.message?.content ?? row.content;
     const text = textFromContent(content);
+    const recordError = errorText(row.error) || errorText(row.message?.error)
+      || (row.type === 'stop_failure' && typeof row.message === 'string' ? errorText(row.message) : undefined);
+    const apiError = role === 'assistant' && Boolean(text) && isApiErrorMessage(text);
     if (role && text) {
       const mappedRole = role === 'assistant' ? 'assistant' : 'user';
       messages.push(message(text, mappedRole, row.timestamp));
       if (mappedRole === 'user' && !title) title = claudeTitle(text);
       lastRole = mappedRole;
       lastMessage = text;
+      if (mappedRole === 'user' || (mappedRole === 'assistant' && !apiError && !recordError)) {
+        errored = false;
+        lastErrorMessage = undefined;
+      }
+      if (apiError) {
+        errored = true;
+        lastErrorMessage = text;
+      }
       if (mappedRole === 'user') complete = false;
     }
     if (role === 'assistant') {
@@ -71,7 +124,10 @@ export function parseClaudeRecords(
       complete = stopReason === 'end_turn' || (stopReason !== 'tool_use' && !hasToolUse);
     }
     if (row.type === 'summary' && typeof row.summary === 'string' && !title) title = row.summary.slice(0, 180);
-    if (row.type === 'stop_failure') errored = true;
+    if (row.type === 'stop_failure' || recordError) {
+      errored = true;
+      if (recordError) lastErrorMessage = recordError;
+    }
     if (row.timestamp) {
       const at = isoOrNow(row.timestamp);
       if (Date.parse(at) > Date.parse(updatedAt)) updatedAt = at;
@@ -83,7 +139,7 @@ export function parseClaudeRecords(
     session: buildSession({
       agent: 'claude-code', nativeId, title, cwd, branch, updatedAt, startedAt: records[0]?.timestamp,
       status: inferStatus(updatedAt, lastRole, complete, errored, now),
-      lastMessage: lastMessage?.slice(-280), lastRole,
+      lastMessage: errored ? formatErrorMessage(lastErrorMessage) : lastMessage?.slice(-280), lastRole,
     }),
     messages,
     statusFacts,
@@ -92,34 +148,83 @@ export function parseClaudeRecords(
 
 export class ClaudeCollector extends WatchedCollector {
   name = 'claude-code';
-  private hookOverrides = new Map<string, { status: SessionStatus; at: number; message?: string }>();
+  private hookOverrides = new Map<string, HookOverride>();
+  private readonly days: number;
+  private readonly approvalHoldMs: number;
+  private readonly now: () => number;
   protected roots(): string[] { return [path.join(agentHome(), '.claude', 'projects')]; }
+  protected watchTargets(): { paths: string[]; depth: number } { return { paths: this.roots(), depth: 2 }; }
   protected async findFiles(): Promise<string[]> {
     const { walkFiles } = await import('./files.js');
     return this.recentFiles(await walkFiles(this.roots()[0]!, (file) => file.endsWith('.jsonl')), this.days);
   }
-  constructor(private days = 7) { super(); }
+  constructor(options: { days?: number; approvalHoldMs?: number; now?: () => number } = {}) {
+    super();
+    this.days = options.days ?? 7;
+    this.approvalHoldMs = options.approvalHoldMs ?? defaultApprovalHoldSeconds * 1000;
+    this.now = options.now ?? Date.now;
+  }
+  private activeHookOverride(nativeId: string, now = this.now()): { status: SessionStatus; at: number; message?: string; event: string } | undefined {
+    return getActiveHookOverride(this.hookOverrides, nativeId, now, this.approvalHoldMs);
+  }
   protected shouldRetain(session: AgentSession): boolean {
-    return this.hookOverrides.has(session.nativeId);
+    return Boolean(this.activeHookOverride(session.nativeId));
   }
   async applyHook(payload: ClaudeHookPayload, emit: EmitSession | undefined = this.emit): Promise<void> {
     if (!payload.session_id || !payload.hook_event_name) return;
-    const status = mapClaudeHook(payload.hook_event_name);
+    const status = mapClaudeHook(payload.hook_event_name, payload);
     if (!status) return;
-    this.hookOverrides.set(payload.session_id, { status, at: Date.now(), message: payload.message });
+    const now = this.now();
+    const failureMessage = formatErrorMessage(errorText(payload.error) || payload.message);
+    this.hookOverrides.set(payload.session_id, {
+      status,
+      at: now,
+      message: status === 'error' ? failureMessage : payload.message,
+      event: payload.hook_event_name,
+    });
     const existing = this.sessions.get(`claude-code:${payload.session_id}`);
     if (existing) {
-      const updated = { ...existing, status, updatedAt: new Date().toISOString(), ...(payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}) };
+      const updated = {
+        ...existing,
+        status,
+        updatedAt: new Date(now).toISOString(),
+        ...(status === 'error'
+          ? { lastMessage: failureMessage }
+          : status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
+      };
       this.sessions.set(existing.id, updated);
       emit?.(updated);
     } else if (payload.cwd) {
       const updated = buildSession({
         agent: 'claude-code', nativeId: payload.session_id, cwd: payload.cwd,
-        title: payload.message || 'Claude Code session', status, updatedAt: new Date().toISOString(),
+        title: payload.message || 'Claude Code session', status, updatedAt: new Date(now).toISOString(),
+        ...(status === 'error' ? { lastMessage: failureMessage } : {}),
+        ...(status === 'needs_input' && payload.message ? { lastMessage: payload.message.slice(0, 280) } : {}),
       });
       this.sessions.set(updated.id, updated);
       emit?.(updated);
     }
+  }
+  async clearNeedsInput(sessionId: string, emit: EmitSession | undefined = this.emit): Promise<void> {
+    const nativeId = sessionId.startsWith('claude-code:') ? sessionId.slice('claude-code:'.length) : sessionId;
+    const hook = this.activeHookOverride(nativeId);
+    if (!hook || hook.status !== 'needs_input') return;
+    this.hookOverrides.delete(nativeId);
+    if (this.fileById.has(nativeId)) {
+      await this.rescan();
+      return;
+    }
+    const existing = this.sessions.get(`claude-code:${nativeId}`);
+    if (!existing) return;
+    const now = this.now();
+    const updated = {
+      ...existing,
+      status: inferStatus(existing.updatedAt, existing.lastRole, false, false, now),
+      updatedAt: new Date(now).toISOString(),
+      lastMessage: undefined,
+    };
+    this.sessions.set(updated.id, updated);
+    emit?.(updated);
   }
   protected async parse(file: string): Promise<ParsedWatchedSession | undefined> {
     const records = await parseJsonLines(file);
@@ -132,19 +237,30 @@ export class ClaudeCollector extends WatchedCollector {
   }
   protected refreshSession(parsed: ParsedWatchedSession, mtimeMs: number, now: number): AgentSession {
     const session = super.refreshSession(parsed, mtimeMs, now);
-    const hook = this.hookOverrides.get(session.nativeId);
+    const hook = this.activeHookOverride(session.nativeId, now);
     if (!hook) return session;
-    const override = claudeHookOverride(mtimeMs, hook.status, hook.at);
+    const override = hookOverrideForFile(mtimeMs, hook, now, this.approvalHoldMs);
     if (!override) {
       this.hookOverrides.delete(session.nativeId);
       return session;
     }
-    return { ...session, status: override, updatedAt: new Date(Math.max(Date.parse(session.updatedAt), hook.at)).toISOString() };
+    return {
+      ...session,
+      status: override.status,
+      ...(hook.status === 'error' ? { lastMessage: hook.message } : {}),
+      updatedAt: new Date(Math.max(Date.parse(session.updatedAt), hook.at)).toISOString(),
+    };
   }
   private messagesById = new Map<string, SessionMessage[]>();
   protected async messages(file: string, limit: number): Promise<SessionMessage[]> {
     const id = path.basename(file, '.jsonl');
     if (!this.messagesById.has(id)) await this.parse(file);
     return (this.messagesById.get(id) || []).slice(-limit);
+  }
+  async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
+    const file = this.fileById.get(nativeId);
+    if (!file) return [];
+    if (!this.messagesById.has(nativeId)) await this.parse(file);
+    return (this.messagesById.get(nativeId) || []).slice(-limit);
   }
 }

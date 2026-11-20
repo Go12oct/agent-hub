@@ -21,6 +21,9 @@ describe('Claude hook installation', () => {
       expect(JSON.parse(second).hooks.Stop).toHaveLength(2);
       expect(JSON.parse(second).hooks.UserPromptSubmit).toHaveLength(1);
       expect(JSON.parse(second).hooks.Stop[0]).toEqual(original.hooks.Stop[0]);
+      expect(JSON.parse(second).hooks.PostToolUse).toHaveLength(1);
+      expect(JSON.parse(second).hooks.PostToolUseFailure).toHaveLength(1);
+      expect(JSON.parse(second).hooks.PermissionDenied).toHaveLength(1);
       expect(first).toBe(second);
       expect(JSON.parse(await readFile(`${file}.agent-hub.bak`, 'utf8'))).toEqual(original);
     } finally {
