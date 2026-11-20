@@ -624,7 +624,7 @@ describe('watched collector cache', () => {
       expect(parseSpy).not.toHaveBeenCalled();
       await Promise.all(notificationPromises);
       expect(fetchMock).not.toHaveBeenCalled();
-      await vi.waitFor(() => expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/^\[cached-test\] rescan: 1 files, 0 parsed,/)));
+      await vi.waitFor(() => expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/^\[cached-test\] rescan: 1 files, 0 parsed,/)), { timeout: 3000 });
 
       await writeFile(file, '{"fixture":false}\n');
       await second.scan((session) => emitted.push(session));

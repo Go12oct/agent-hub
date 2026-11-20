@@ -1,7 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import type { RelayConfig } from './relay.js';
+
+declare const __DEFAULT_RELAY_URL__: string | undefined;
 
 export interface HubConfig {
   token: string;
@@ -15,6 +18,8 @@ export interface HubConfig {
   approvals?: { enabled?: boolean; holdSeconds?: number };
   codexCloud: { enabled: boolean };
   localReplies?: { enabled?: boolean; codex?: string; claude?: string; agy?: string };
+  relayUrl?: string | false;
+  relay?: RelayConfig;
 }
 
 export function configDirectory(): string {
@@ -25,6 +30,21 @@ export function configDirectory(): string {
 
 export function agentHome(): string {
   return process.env.AGENT_HUB_HOME || homedir();
+}
+
+async function relaySecret(dir: string): Promise<string> {
+  const file = path.join(dir, 'relay-key');
+  try { return (await readFile(file, 'utf8')).trim(); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const secret = randomBytes(32).toString('hex');
+  const temporary = `${file}.${randomBytes(8).toString('hex')}`;
+  await writeFile(temporary, secret, { mode: 0o600, flag: 'wx' });
+  try { await link(temporary, file); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    return (await readFile(file, 'utf8')).trim();
+  } finally { await unlink(temporary); }
+  return secret;
 }
 
 export async function loadConfig(): Promise<HubConfig> {
@@ -50,6 +70,18 @@ export async function loadConfig(): Promise<HubConfig> {
   if (process.env.DEVIN_PAT) config.devinPat = process.env.DEVIN_PAT;
   if (process.env.DEVIN_ORG_ID) config.devinOrgId = process.env.DEVIN_ORG_ID;
   if (process.env.AGENT_HUB_PORT) config.port = Number(process.env.AGENT_HUB_PORT);
+  delete config.relay;
+  const defaultRelayUrl = typeof __DEFAULT_RELAY_URL__ === 'string' ? __DEFAULT_RELAY_URL__ : undefined;
+  const relayUrl = process.env.AGENT_HUB_RELAY_URL ?? config.relayUrl ?? defaultRelayUrl;
+  if (relayUrl && relayUrl !== 'false') {
+    const url = URL.parse(String(relayUrl));
+    if (!url || url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+      throw new Error('The relay URL must be an HTTPS origin (for example, https://relay.example.com).');
+    }
+    const secret = await relaySecret(dir);
+    if (!/^[a-f0-9]{64}$/.test(secret)) throw new Error('Invalid relay-key in the Agent Hub configuration directory.');
+    config.relay = { origin: url.origin, secret };
+  }
   return config;
 }
 
@@ -62,6 +94,7 @@ export async function setConfigValue(key: string, value: string): Promise<void> 
     config = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
   } catch {
     config = await loadConfig() as unknown as Record<string, unknown>;
+    delete config.relay;
   }
   const segments = key.split('.');
   let current = config;

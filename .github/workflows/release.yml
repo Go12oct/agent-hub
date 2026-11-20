@@ -47,6 +47,8 @@ jobs:
       - run: npm ci
       - run: npm run build:web
       - run: npm run build:daemon
+        env:
+          AGENT_HUB_DEFAULT_RELAY_URL: ${{ vars.AGENT_HUB_DEFAULT_RELAY_URL || 'https://92-5-42-80.sslip.io' }}
       - name: Build Windows executable
         continue-on-error: true
         run: node daemon/scripts/build-sea.mjs

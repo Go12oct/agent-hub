@@ -7,6 +7,16 @@ export interface PairingDetails {
   url: string;
   token: string;
   urls?: string[];
+  relay?: string;
+}
+
+function relayUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash &&
+      /^\/hub\/[a-f0-9]{64}$/.test(url.pathname)) return url.href;
+  } catch { /* Ignore invalid relay addresses. */ }
 }
 
 function origin(value: string): string | undefined {
@@ -26,7 +36,8 @@ export function parsePairingLink(input: string): PairingDetails | undefined {
       const urls = parsed.searchParams.getAll('url').map(origin).filter((item): item is string => Boolean(item));
       const token = parsed.searchParams.get('token');
       if (!urls.length || !token) return undefined;
-      return urls.length > 1 ? { url: urls[0]!, token, urls } : { url: urls[0]!, token };
+      const relay = relayUrl(parsed.searchParams.get('relay'));
+      return { url: urls[0]!, token, ...(urls.length > 1 ? { urls } : {}), ...(relay ? { relay } : {}) };
     }
     const parsed = new URL(value);
     const token = parsed.searchParams.get('token');
@@ -38,7 +49,13 @@ export function parsePairingLink(input: string): PairingDetails | undefined {
 }
 
 export function candidateUrls(pairing: PairingDetails): string[] {
-  return [...new Set([pairing.url, ...(pairing.urls || [])].map(origin).filter((item): item is string => Boolean(item)))];
+  const relay = relayUrl(pairing.relay);
+  const direct = directUrls([pairing.url, ...(pairing.urls || [])]);
+  return !relay ? direct : pairing.url === relay ? [relay, ...direct] : [...direct, relay];
+}
+
+function directUrls(urls: string[]): string[] {
+  return [...new Set(urls.filter((item) => !relayUrl(item)).map(origin).filter((item): item is string => Boolean(item)))];
 }
 
 export function newNonce(): string {
@@ -58,10 +75,19 @@ export async function verifyHubProof(token: string, nonce: string, proof: unknow
   return difference === 0;
 }
 
-export function mergeKnownUrls(pairing: PairingDetails, discovered: unknown): PairingDetails {
+export function mergeKnownUrls(pairing: PairingDetails, discovered: unknown, discoveredRelay?: unknown): PairingDetails {
   const extra = Array.isArray(discovered) ? discovered.filter((item): item is string => typeof item === 'string') : [];
-  const urls = [...new Set([...(pairing.urls || []), pairing.url, ...extra].map(origin).filter((item): item is string => Boolean(item)))];
-  return { ...pairing, urls };
+  const urls = directUrls([...(pairing.urls || []), pairing.url, ...extra]);
+  const relay = relayUrl(discoveredRelay);
+  return { ...pairing, urls, ...(relay ? { relay } : {}) };
+}
+
+export async function findReachable(
+  pairing: PairingDetails,
+  probe: (url: string, relay: boolean) => Promise<boolean>,
+): Promise<string | undefined> {
+  const checks = candidateUrls(pairing).map((url) => ({ url, result: probe(url, url === pairing.relay) }));
+  for (const { url, result } of checks) if (await result) return url;
 }
 
 export function feedGroups(sessions: AgentSession[]): { needsYou: AgentSession[]; working: AgentSession[]; recent: AgentSession[] } {

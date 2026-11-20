@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import type { AgentSession } from '@agent-hub/shared';
 import {
-  candidateUrls, feedGroups, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
+  candidateUrls, feedGroups, findReachable, mergeKnownUrls, newNonce, parsePairingLink, previewText, verifyHubProof,
 } from './pairing';
 
 describe('pairing links', () => {
@@ -12,6 +12,20 @@ describe('pairing links', () => {
   });
   it('rejects incomplete links', () => {
     expect(parsePairingLink('agenthub://pair?token=x')).toBeUndefined();
+  });
+  it('keeps the relay path for fallback without losing the LAN address', async () => {
+    const relay = `https://relay.example.test/hub/${'a'.repeat(64)}`;
+    const lan = 'http://192.168.1.2:4747';
+    const pair = parsePairingLink(`agenthub://pair?url=${encodeURIComponent(lan)}&token=test&relay=${encodeURIComponent(relay)}`)!;
+    expect(pair.relay).toBe(relay);
+    expect(candidateUrls(pair)).toEqual([lan, relay]);
+    const probe = vi.fn(async (_url: string, isRelay: boolean) => isRelay);
+    expect(await findReachable(pair, probe)).toBe(relay);
+    expect(probe.mock.calls).toEqual([[lan, false], [relay, true]]);
+    expect(await findReachable(pair, async () => true)).toBe(lan);
+    expect(candidateUrls(mergeKnownUrls({ ...pair, url: relay }, [lan]))).toEqual([relay, lan]);
+    expect(mergeKnownUrls({ url: lan, token: 'test' }, [], relay).relay).toBe(relay);
+    expect(parsePairingLink(`agenthub://pair?url=${encodeURIComponent(lan)}&token=test&relay=${encodeURIComponent(relay.replace('https:', 'http:'))}`)?.relay).toBeUndefined();
   });
 });
 

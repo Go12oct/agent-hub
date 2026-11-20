@@ -5,7 +5,7 @@
   "bin": { "agent-hub": "./dist/agent-hub.cjs" },
   "scripts": {
     "dev": "tsx src/cli.ts start",
-    "build": "esbuild src/cli.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/agent-hub.cjs && esbuild src/hook-bridge.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/hook-bridge.cjs"
+    "build": "node scripts/build.mjs"
   },
   "dependencies": {
     "@agent-hub/shared": "*",
@@ -13,10 +13,12 @@
     "@fastify/static": "^10.1.8",
     "chokidar": "^4.0.3",
     "fastify": "^5.3.3",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.25.5",
     "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.4"
