@@ -141,6 +141,36 @@ describe('Devin deck link', () => {
   });
 });
 
+it('keeps offline approval cards retryable once the connection returns', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const onDecide = vi.fn(() => true);
+  const approval: PendingApproval = { id: 'approve', toolName: 'Write', summary: 'Write a file', requestedAt: new Date().toISOString() };
+  const session: AgentSession = {
+    id: 'codex:session', agent: 'codex', nativeId: 'session', title: 'Session',
+    status: 'needs_input', canReply: true, updatedAt: approval.requestedAt, machine: 'test',
+  };
+  const container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  const render = (online: boolean) => act(async () => {
+    root?.render(createElement(DeckCard, { item: { kind: 'approval', session, approval }, depth: 0, online, onOpen: vi.fn(), onDecide }));
+  });
+  await render(false);
+  const card = container.querySelector<HTMLElement>('.deck-card')!;
+  const allow = container.querySelector<HTMLButtonElement>('.deck-allow')!;
+  expect(card.style.touchAction).not.toBe('pan-y');
+  expect(allow.disabled).toBe(true);
+  await act(async () => { allow.click(); });
+  expect(onDecide).not.toHaveBeenCalled();
+
+  await render(true);
+  expect(container.querySelector('.deck-card')).toBe(card);
+  expect(card.style.touchAction).toBe('pan-y');
+  expect(allow.disabled).toBe(false);
+  await act(async () => { allow.click(); });
+  await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('allow'));
+});
+
 describe('read-only Devin approvals', () => {
   const approval: PendingApproval = {
     id: 'devin-card:permission-1',

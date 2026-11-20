@@ -503,8 +503,8 @@ export function AgentHub() {
     );
   }
 
-  async function decide(item: QueueItem, decision: 'allow' | 'deny') {
-    if (item.kind !== 'approval' || item.approval.readOnly || !pairing || !url) return;
+  function decide(item: QueueItem, decision: 'allow' | 'deny'): boolean {
+    if (item.kind !== 'approval' || item.approval.readOnly || !pairing || !url) return false;
     const { session, approval } = item;
     setHiddenApprovalIds((current) => new Set(current).add(approval.id));
     setDecisionErrors((current) => {
@@ -512,15 +512,16 @@ export function AgentHub() {
       delete next[approval.id];
       return next;
     });
-    const error = await sendDecision(pairing, session.id, approval.id, decision);
-    if (error) {
+    void sendDecision(pairing, session.id, approval.id, decision).then((error) => {
+      if (!error) return;
       setHiddenApprovalIds((current) => {
         const next = new Set(current);
         next.delete(approval.id);
         return next;
       });
       setDecisionErrors((current) => ({ ...current, [approval.id]: error }));
-    }
+    });
+    return true;
   }
 
   return (
@@ -543,7 +544,7 @@ export function AgentHub() {
               </span>
               <h1>{queue.length ? <><em>{queue.length}</em> need{queue.length === 1 ? 's' : ''} you</> : 'All clear'}</h1>
               <p className="app-sub">{queue.length
-                ? 'Swipe right to allow, left to deny'
+                ? url ? 'Swipe right to allow, left to deny' : 'Reconnect to answer requests'
                 : workingCount ? `${workingCount} agent${workingCount === 1 ? '' : 's'} working` : 'Nothing running'}</p>
             </div>
             <button className="icon-btn glass" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={19} /></button>
@@ -564,7 +565,7 @@ export function AgentHub() {
       <div className="list">
         {filtered.length === 0 ? <Empty connection={connection} agent={selectedAgent} /> : (
           <>
-            <ApprovalDeck items={queue} errors={decisionErrors} onOpen={openSession} onDecide={(item, value) => void decide(item, value)} />
+            <ApprovalDeck items={queue} errors={decisionErrors} online={Boolean(url)} onOpen={openSession} onDecide={decide} />
             <div className="section-head"><span>Agents</span><span>{workingCount} working</span></div>
             <LayoutGroup>
               <div className="agent-tiles">
@@ -629,13 +630,15 @@ function queueItemKey(item: QueueItem): string {
 function ApprovalDeck({
   items,
   errors,
+  online,
   onOpen,
   onDecide,
 }: {
   items: QueueItem[];
   errors: Record<string, string>;
+  online: boolean;
   onOpen: (id: string, source?: HTMLElement) => void;
-  onDecide: (item: QueueItem, decision: 'allow' | 'deny') => void;
+  onDecide: (item: QueueItem, decision: 'allow' | 'deny') => boolean;
 }) {
   if (!items.length) {
     return <div className="deck-empty"><strong>Nothing needs you</strong><span>You'll get a ping when an agent asks.</span></div>;
@@ -648,6 +651,7 @@ function ApprovalDeck({
           key={queueItemKey(item)}
           item={item}
           depth={depth}
+          online={online}
           error={item.kind === 'approval' ? errors[item.approval.id] : undefined}
           onOpen={(source) => onOpen(item.session.id, source)}
           onDecide={(decision) => onDecide(item, decision)}
@@ -661,23 +665,27 @@ export function DeckCard({
   item,
   depth,
   error,
+  online = true,
   onOpen,
   onDecide,
 }: {
   item: QueueItem;
   depth: number;
   error?: string;
+  online?: boolean;
   onOpen: (source: HTMLElement) => void;
-  onDecide: (decision: 'allow' | 'deny') => void;
+  onDecide: (decision: 'allow' | 'deny') => boolean;
 }) {
   const x = useMotionValue(0);
   const rotate = useTransform(x, [-240, 0, 240], [-10, 0, 10]);
   const allowOpacity = useTransform(x, [0, 100], [0, 1]);
   const denyOpacity = useTransform(x, [-100, 0], [1, 0]);
   const committing = useRef(false);
+  const latestDecision = useRef(onDecide);
+  latestDecision.current = onDecide;
   const approval = item.kind === 'approval' ? item.approval : undefined;
   const questions = approval?.questions ?? [];
-  const swipeable = Boolean(approval && !approval.readOnly && questions.length === 0 && depth === 0);
+  const swipeable = Boolean(online && approval && !approval.readOnly && questions.length === 0 && depth === 0);
   const preview = item.kind === 'input' && item.session.lastMessage ? previewText(item.session.lastMessage) : '';
   const depthIndex = Math.min(depth, 3);
   const y = [0, 12, 24, 24][depthIndex]!;
@@ -693,7 +701,10 @@ export function DeckCard({
       damping: 32,
       velocity,
     });
-    onDecide(decision);
+    if (!latestDecision.current(decision)) {
+      await animate(x, 0, { type: 'spring', stiffness: 500, damping: 34 });
+      committing.current = false;
+    }
   }
 
   function endDrag(info: { offset: { x: number }; velocity: { x: number } }) {
@@ -701,7 +712,7 @@ export function DeckCard({
     const velocityDirection = Math.sign(info.velocity.x);
     const offsetCommits = Math.abs(info.offset.x) > 100;
     const velocityCommits = Math.abs(info.velocity.x) > 600 && (!offsetDirection || velocityDirection === offsetDirection);
-    if (offsetCommits || velocityCommits) {
+    if (swipeable && (offsetCommits || velocityCommits)) {
       const direction = offsetCommits ? offsetDirection : velocityDirection;
       const velocity = velocityDirection === direction ? info.velocity.x : 0;
       void flyOut(direction > 0 ? 'allow' : 'deny', velocity);
@@ -786,8 +797,8 @@ export function DeckCard({
       ) : approval && questions.length === 0 ? (
         <>
           <div className="deck-actions">
-            <button className="deck-deny" onClick={() => void flyOut('deny')}>Deny</button>
-            <button className="deck-allow" onClick={() => void flyOut('allow')}>Allow</button>
+            <button className="deck-deny" disabled={!swipeable} onClick={() => void flyOut('deny')}>Deny</button>
+            <button className="deck-allow" disabled={!swipeable} onClick={() => void flyOut('allow')}>Allow</button>
           </div>
           <button className="deck-open" onClick={(event) => {
             const source = event.currentTarget.closest<HTMLElement>('.deck-card');

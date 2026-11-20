@@ -274,6 +274,7 @@ a { color: var(--text); }
 .deck-input { font-size: 14px; }
 .deck-actions { display: grid; grid-template-columns: 1fr 1.6fr; gap: 8px; margin-top: auto; }
 .deck-actions button, .deck-primary { height: 48px; border-radius: 14px; font-size: 16px; font-weight: 500; }
+.deck-actions button:disabled { opacity: .5; }
 .deck-deny { border: 1px solid var(--line-strong); color: var(--text-2); }
 .deck-allow, .deck-primary { background: var(--accent); color: var(--on-accent); }
 .deck-primary { width: 100%; margin-top: auto; }
