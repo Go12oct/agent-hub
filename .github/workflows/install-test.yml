@@ -3,7 +3,7 @@ name: Windows fresh install
 on:
   pull_request:
   push:
-    branches: [main, 'devin/*-ci-fresh-install', '**-revert-check']
+    branches: [main, 'devin/*-ci-fresh-install']
   workflow_dispatch:
 
 permissions:
