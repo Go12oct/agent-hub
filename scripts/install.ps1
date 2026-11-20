@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 $installDir = Join-Path $env:LOCALAPPDATA "agent-hub"
 $sourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $packageRoot = if (Test-Path (Join-Path $sourceDir "daemon\dist")) { $sourceDir } else { Split-Path -Parent $sourceDir }
+Get-ChildItem -LiteralPath $packageRoot -Recurse -File -Force | Unblock-File
 $bundle = Join-Path $packageRoot "daemon\dist\agent-hub.cjs"
 $standalone = Join-Path $packageRoot "daemon\dist\agent-hub.exe"
 $hookBridgeSource = Join-Path $packageRoot "daemon\dist\hook-bridge.cjs"
@@ -54,11 +55,55 @@ if (Test-Path $webDir) {
   New-Item -ItemType Directory -Force -Path $publicDir | Out-Null
   Copy-Item (Join-Path $webDir "*") $publicDir -Recurse -Force
 }
+Get-ChildItem -LiteralPath $installDir -Recurse -File -Force | Unblock-File
 $env:PATH = "$installDir;$env:PATH"
 & $shim install-service
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning "Background registration failed. Checking whether Agent Hub can start directly."
+}
+$configDir = if ($env:AGENT_HUB_CONFIG_DIR) { $env:AGENT_HUB_CONFIG_DIR } else { Join-Path $env:APPDATA "agent-hub" }
+$port = 4747
+$configPath = Join-Path $configDir "config.json"
+if (Test-Path $configPath) {
+  $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+  $port = [int]$config.port
+}
+if ($env:AGENT_HUB_PORT) { $port = [int]$env:AGENT_HUB_PORT }
+$healthUrl = "http://127.0.0.1:$port/health"
+$logPath = if ($env:AGENT_HUB_LOG) { $env:AGENT_HUB_LOG } else { Join-Path $installDir "agent-hub.log" }
+
+function Wait-AgentHub {
+  $deadline = [DateTime]::UtcNow.AddSeconds(25)
+  do {
+    try {
+      $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2
+      if ($response.StatusCode -eq 200 -and ($response.Content | ConvertFrom-Json).ok -eq $true) { return $true }
+    } catch {}
+    Start-Sleep -Milliseconds 500
+  } while ([DateTime]::UtcNow -lt $deadline)
+  return $false
+}
+
+if (-not (Wait-AgentHub)) {
+  Write-Warning "Agent Hub did not start through its background launcher. Trying a direct hidden start."
+  try {
+    if (Test-Path $standalone) {
+      Start-Process -FilePath (Join-Path $installDir "agent-hub.exe") -ArgumentList "start" -WindowStyle Hidden
+    } else {
+      Start-Process -FilePath $node.Source -ArgumentList @("`"$installDir\agent-hub.cjs`"", "start") -WindowStyle Hidden
+    }
+  } catch {
+    Write-Error "Agent Hub could not be started: $($_.Exception.Message). Log: $logPath"
+  }
+  if (-not (Wait-AgentHub)) {
+    Write-Error "Agent Hub is not healthy at $healthUrl after background and direct startup attempts. Installation failed. Log: $logPath"
+  }
+}
+Write-Host "Agent Hub is running ($healthUrl). Log: $logPath"
+Write-Host "Phone access through Windows Firewall needs one administrator UAC approval."
 & $shim firewall
 if ($LASTEXITCODE -ne 0) {
-  Write-Warning "The Agent Hub Firewall rule was not added. Run 'agent-hub firewall' as administrator."
+  Write-Warning "The Windows Firewall rule was not added. Your phone cannot connect through Windows Firewall until an administrator approves the UAC prompt or runs 'agent-hub firewall' as administrator."
 }
 $claudeConfigDir = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE ".claude" }
 if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfigDir -PathType Container)) {

@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -245,21 +245,56 @@ describe('Devin Local collector', () => {
     }
   });
 
-  it('logs a missing database once and emits no sessions', async () => {
+  it('quietly skips a missing database and returns no messages', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-devin-local-missing-'));
     const collector = new TestDevinLocalCollector(path.join(directory, 'missing.db'));
-    const emitted: AgentSession[] = [];
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    collector.start(makeEmitter(emitted));
     try {
-      await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
       await expect(collector.refresh()).resolves.toBeUndefined();
-      expect(emitted).toEqual([]);
+      await expect(collector.refresh()).resolves.toBeUndefined();
+      await expect(collector.getMessages('missing', 30)).resolves.toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      collector.stop();
+      warn.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('still warns once when an existing database is invalid', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-hub-devin-local-invalid-'));
+    const dbPath = path.join(directory, 'sessions.db');
+    await writeFile(dbPath, 'not a sqlite database');
+    const collector = new TestDevinLocalCollector(dbPath);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await collector.refresh();
+      await collector.refresh();
+      await expect(collector.getMessages('missing', 30)).resolves.toEqual([]);
       expect(warn).toHaveBeenCalledTimes(1);
     } finally {
       collector.stop();
       warn.mockRestore();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('picks up a database created after an initially missing poll', async () => {
+    const fixture = await makeDatabase();
+    const laterPath = path.join(fixture.directory, 'later.db');
+    const collector = new TestDevinLocalCollector(laterPath);
+    const emitted: AgentSession[] = [];
+    try {
+      await collector.refresh();
+      await copyFile(fixture.dbPath, laterPath);
+      const database = new DatabaseSync(laterPath);
+      insertSession(database, { id: 'created-later', nodes: [] });
+      database.close();
+      collector.start(makeEmitter(emitted));
+      await vi.waitFor(() => expect(emitted).toContainEqual(expect.objectContaining({ id: 'devin-local:created-later' })));
+    } finally {
+      collector.stop();
+      await rm(fixture.directory, { recursive: true, force: true });
     }
   });
 

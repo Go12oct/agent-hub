@@ -7,6 +7,7 @@ if "%result%"=="0" (
   echo Agent Hub installation finished.
 ) else (
   echo Agent Hub installation failed with exit code %result%.
+  echo Review the error and log location above before closing this window.
 )
 pause
 exit /b %result%

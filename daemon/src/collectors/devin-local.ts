@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { stat } from 'node:fs/promises';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
 import type { Collector, EmitSession } from './types.js';
 
@@ -108,6 +109,7 @@ export class DevinLocalCollector implements Collector {
   async getMessages(nativeId: string, limit: number): Promise<SessionMessage[]> {
     let database: any;
     try {
+      if (!await this.databaseExists()) return [];
       const { DatabaseSync } = await import('node:sqlite');
       database = new DatabaseSync(this.dbPath, { readOnly: true });
       const getNode = database.prepare(
@@ -143,6 +145,7 @@ export class DevinLocalCollector implements Collector {
     this.polling = true;
     let database: any;
     try {
+      if (!await this.databaseExists()) return;
       const { DatabaseSync } = await import('node:sqlite');
       database = new DatabaseSync(this.dbPath, { readOnly: true });
       const rows = database.prepare(`
@@ -228,6 +231,16 @@ export class DevinLocalCollector implements Collector {
         this.warn(error);
       }
       this.polling = false;
+    }
+  }
+
+  private async databaseExists(): Promise<boolean> {
+    try {
+      await stat(this.dbPath);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
     }
   }
 

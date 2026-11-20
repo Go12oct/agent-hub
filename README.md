@@ -11,7 +11,11 @@ Tailscale.
    and unzip it.
 2. Double-click **Install-AgentHub.cmd** in the extracted folder. The installer
    sets Agent Hub to start when you sign in and adds a tray icon. It does not
-   need Node.js, npm, or administrator access. If Windows does not allow a
+   need Node.js, npm, or administrator access to install. Allowing your phone
+   through Windows Firewall needs one administrator UAC approval; approve the
+   prompt or ask an administrator to run `agent-hub firewall`. Without that
+   rule, Windows Firewall can block your phone even while the PC app works.
+   If Windows does not allow a
    Scheduled Task, it uses your per-user Startup folder instead.
 3. Download **agent-hub-android.apk** from the same release and install it on
    your phone. Android may ask you to allow installation from that source.
@@ -23,6 +27,13 @@ Tailscale.
 The desktop browser view is at <http://localhost:4747>. To remove Agent Hub,
 double-click **Uninstall-AgentHub.cmd** in the extracted folder. Your
 configuration and agent transcripts are left untouched.
+
+The installer removes Windows download blocking from the extracted package and
+installed files, then checks that the daemon is healthy before reporting success.
+If Windows shows a publisher warning when opening `Install-AgentHub.cmd`, check
+that the ZIP came from this project's release page before choosing Run. If startup
+fails, the installer stays open with an error and the daemon log location
+(`%LOCALAPPDATA%\agent-hub\agent-hub.log` by default).
 
 The daemon's configuration and random access token are stored in
 `%APPDATA%\agent-hub\config.json`. Keep this file private. The token is never

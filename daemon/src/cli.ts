@@ -106,7 +106,7 @@ async function run(): Promise<void> {
       await addWindowsFirewallRule(port);
       console.log(`Windows Firewall allows Agent Hub on TCP port ${port}.`);
     } catch {
-      console.warn('Could not add the Windows Firewall rule. Approve the UAC prompt or run agent-hub firewall as administrator.');
+      console.warn('Your phone cannot connect through Windows Firewall until an administrator approves the UAC prompt or runs agent-hub firewall as administrator.');
       process.exitCode = 1;
     }
   } else if (command === 'config' && args[0] === 'set' && args[1] && args[2] !== undefined) {
