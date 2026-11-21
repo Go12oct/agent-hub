@@ -8,4 +8,5 @@ export interface Collector {
   stop(): void;
   getMessages(nativeId: string, limit: number): Promise<SessionMessage[]>;
   sendMessage?(nativeId: string, text: string): Promise<void>;
+  decideApproval?(nativeId: string, approvalId: string | undefined, decision: 'allow' | 'deny'): Promise<'ok' | 'none'>;
 }

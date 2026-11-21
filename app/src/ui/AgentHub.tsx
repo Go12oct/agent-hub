@@ -150,6 +150,30 @@ async function sendDecision(
   }
 }
 
+function appVersionValue(version: string): [number, number, number] | undefined {
+  const match = version.trim().replace(/^v/i, '').match(/^(\d+)\.(\d+)\.(\d+)/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined;
+}
+
+function isNewerVersion(candidate: string | undefined, current: string): boolean {
+  if (!candidate) return false;
+  const a = appVersionValue(candidate);
+  const b = appVersionValue(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i]! !== b[i]!) return a[i]! > b[i]!;
+  }
+  return false;
+}
+
+interface UpdateStatus {
+  currentVersion: string;
+  latestVersion?: string;
+  updateAvailable: boolean;
+  releaseUrl?: string;
+  androidDownloadUrl?: string;
+}
+
 export function AgentHub() {
   const [pairing, setPairing] = useState<PairingDetails>();
   const [verifiedUrl, setVerifiedUrl] = useState<string>();
@@ -166,6 +190,8 @@ export function AgentHub() {
   const [hiddenApprovalIds, setHiddenApprovalIds] = useState<Set<string>>(new Set());
   const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
   const [finishedOpen, setFinishedOpen] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const pairingRef = useRef<PairingDetails | undefined>(undefined);
   const failingOver = useRef(false);
   const previousStatuses = useRef(new Map<string, AgentSession['status']>());
@@ -176,6 +202,16 @@ export function AgentHub() {
 
   const url = pairing?.url === verifiedUrl ? verifiedUrl : undefined;
   const token = pairing?.token;
+
+  useEffect(() => {
+    if (!url || !token) return;
+    let active = true;
+    void fetch(`${url}/api/update`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => (response.ok ? response.json() as Promise<UpdateStatus> : undefined))
+      .then((data) => { if (active && data) setUpdateStatus(data); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [url, token]);
 
   const clearLocalNotifications = useCallback(async (ids: number[]) => {
     if (!Capacitor.isNativePlatform()) return;
@@ -524,6 +560,15 @@ export function AgentHub() {
     return true;
   }
 
+  const showUpdateBanner = Boolean(
+    !updateDismissed
+    && updateStatus?.latestVersion
+    && (updateStatus.updateAvailable || isNewerVersion(updateStatus.latestVersion, __APP_VERSION__)),
+  );
+  const updateHref = Capacitor.isNativePlatform()
+    ? updateStatus?.androidDownloadUrl || updateStatus?.releaseUrl
+    : updateStatus?.releaseUrl || updateStatus?.androidDownloadUrl;
+
   return (
     <main className="screen" data-agent={selectedAgent}>
       <header className="app-bar">
@@ -561,6 +606,18 @@ export function AgentHub() {
           </button>
         ))}
       </nav>
+
+      {showUpdateBanner && updateStatus?.latestVersion && (
+        <div className="update-banner" role="status">
+          <span>Update available: <strong>v{updateStatus.latestVersion}</strong></span>
+          <div className="update-banner-actions">
+            {updateHref && (
+              <a className="update-link" href={updateHref} target="_blank" rel="noreferrer">Download</a>
+            )}
+            <button className="icon-btn" aria-label="Dismiss update" onClick={() => setUpdateDismissed(true)}><X size={16} /></button>
+          </div>
+        </div>
+      )}
 
       <div className="list">
         {filtered.length === 0 ? <Empty connection={connection} agent={selectedAgent} /> : (
