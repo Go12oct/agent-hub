@@ -16,6 +16,7 @@ export interface HubConfig {
   devinOrgId?: string;
   ntfy?: { server?: string; topic: string };
   approvals?: { enabled?: boolean; holdSeconds?: number };
+  aside?: { enabled?: boolean };
   codexCloud: { enabled: boolean };
   localReplies?: { enabled?: boolean; codex?: string; claude?: string; agy?: string };
   relayUrl?: string | false;

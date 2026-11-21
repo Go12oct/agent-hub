@@ -84,7 +84,7 @@ export function createHub(
     claude,
     new AntigravityCollector(config.lookbackDays),
     new DevinLocalCollector(),
-    ...(process.platform === 'win32' ? [new AsideCollector()] : []),
+    ...(process.platform === 'win32' && config.aside?.enabled !== false ? [new AsideCollector()] : []),
     ...(config.devinApiKey || devinV3 ? [new DevinCollector(config.devinApiKey, undefined, devinV3)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];

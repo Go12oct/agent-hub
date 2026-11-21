@@ -191,7 +191,9 @@ export function AgentHub() {
   const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
   const [finishedOpen, setFinishedOpen] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
-  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [dismissedVersion, setDismissedVersion] = useState<string | undefined>(() => {
+    try { return localStorage.getItem('agent-hub-update-dismissed') || undefined; } catch { return undefined; }
+  });
   const pairingRef = useRef<PairingDetails | undefined>(undefined);
   const failingOver = useRef(false);
   const previousStatuses = useRef(new Map<string, AgentSession['status']>());
@@ -206,11 +208,18 @@ export function AgentHub() {
   useEffect(() => {
     if (!url || !token) return;
     let active = true;
-    void fetch(`${url}/api/update`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((response) => (response.ok ? response.json() as Promise<UpdateStatus> : undefined))
-      .then((data) => { if (active && data) setUpdateStatus(data); })
-      .catch(() => {});
-    return () => { active = false; };
+    const fetchUpdate = () => {
+      void fetch(`${url}/api/update`, { headers: { Authorization: `Bearer ${token}` } })
+        .then((response) => (response.ok ? response.json() as Promise<UpdateStatus> : undefined))
+        .then((data) => { if (active && data) setUpdateStatus(data); })
+        .catch(() => {});
+    };
+    fetchUpdate();
+    const timer = setInterval(fetchUpdate, 6 * 60 * 60_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [url, token]);
 
   const clearLocalNotifications = useCallback(async (ids: number[]) => {
@@ -560,14 +569,28 @@ export function AgentHub() {
     return true;
   }
 
+  const pcOutOfDate = Boolean(
+    updateStatus?.latestVersion && isNewerVersion(updateStatus.latestVersion, updateStatus.currentVersion),
+  );
   const showUpdateBanner = Boolean(
-    !updateDismissed
-    && updateStatus?.latestVersion
+    updateStatus?.latestVersion
+    && dismissedVersion !== updateStatus.latestVersion
     && (updateStatus.updateAvailable || isNewerVersion(updateStatus.latestVersion, __APP_VERSION__)),
   );
   const updateHref = Capacitor.isNativePlatform()
     ? updateStatus?.androidDownloadUrl || updateStatus?.releaseUrl
     : updateStatus?.releaseUrl || updateStatus?.androidDownloadUrl;
+
+  function openUpdateLink() {
+    if (!updateHref) return;
+    if (Capacitor.isNativePlatform()) window.location.href = updateHref;
+    else window.open(updateHref, '_blank', 'noopener');
+  }
+
+  function dismissUpdate(version: string) {
+    try { localStorage.setItem('agent-hub-update-dismissed', version); } catch {}
+    setDismissedVersion(version);
+  }
 
   return (
     <main className="screen" data-agent={selectedAgent}>
@@ -609,12 +632,20 @@ export function AgentHub() {
 
       {showUpdateBanner && updateStatus?.latestVersion && (
         <div className="update-banner" role="status">
-          <span>Update available: <strong>v{updateStatus.latestVersion}</strong></span>
+          <span>
+            Update available: <strong>v{updateStatus.latestVersion}</strong>
+            {pcOutOfDate ? ' · PC app is out of date' : ''}
+          </span>
           <div className="update-banner-actions">
             {updateHref && (
-              <a className="update-link" href={updateHref} target="_blank" rel="noreferrer">Download</a>
+              <button type="button" className="update-link" onClick={openUpdateLink}>Download</button>
             )}
-            <button className="icon-btn" aria-label="Dismiss update" onClick={() => setUpdateDismissed(true)}><X size={16} /></button>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Dismiss update"
+              onClick={() => dismissUpdate(updateStatus.latestVersion!)}
+            ><X size={16} /></button>
           </div>
         </div>
       )}
