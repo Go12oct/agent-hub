@@ -2,7 +2,7 @@ import path from 'node:path';
 import type { Dirent, Stats } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
-import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
+import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, sanitizeDisplayText, sanitizeTitle, textFromContent } from './files.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
@@ -24,7 +24,8 @@ function cleanUserText(text: string): string {
   const withoutOpeningTag = text.replace(/^\s*<USER_REQUEST>\s*/i, '');
   const matches = [...withoutOpeningTag.matchAll(/<\/USER_REQUEST>/gi)];
   const closingTag = matches.length ? matches[matches.length - 1]!.index! : -1;
-  return (closingTag < 0 ? withoutOpeningTag : withoutOpeningTag.slice(0, closingTag)).trim();
+  const extracted = (closingTag < 0 ? withoutOpeningTag : withoutOpeningTag.slice(0, closingTag)).trim();
+  return sanitizeDisplayText(extracted);
 }
 
 function isSystemMessage(text: string): boolean {
@@ -55,6 +56,7 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
       : roleName.includes('assistant') || roleName.includes('model') || roleName.includes('agent') ? 'assistant'
         : roleName.includes('system') || roleName.includes('tool') ? 'tool' : undefined;
     if (role === 'user' && typeof text === 'string') text = cleanUserText(text);
+    else if (role === 'assistant' && typeof text === 'string') text = sanitizeDisplayText(text);
     if (typeof row.cwd === 'string') cwd = row.cwd;
     if (typeof row.branch === 'string') branch = row.branch;
     if (row.timestamp || row.created_at || row.at) {
@@ -66,7 +68,7 @@ export function parseAntigravityRecords(records: Record<string, any>[], id: stri
         if (!isSystemMessage(text)) complete = false;
       } else if (!isSystemMessage(text)) {
         messages.push(message(text, role, row.timestamp));
-        if (role === 'user' && !title) title = text.trim().slice(0, 180);
+        if (role === 'user' && !title) title = sanitizeTitle(text);
         lastRole = role;
         lastMessage = text;
         lastActivityIndex = index;
