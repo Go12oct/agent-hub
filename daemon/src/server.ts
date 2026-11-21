@@ -14,12 +14,14 @@ import { AntigravityCollector } from './collectors/antigravity.js';
 import { DevinCollector } from './collectors/devin.js';
 import { DevinLocalCollector } from './collectors/devin-local.js';
 import { CodexCloudCollector } from './collectors/codex-cloud.js';
+import { AsideCollector } from './collectors/aside.js';
 import type { HubConfig } from './config.js';
 import { cleanReplyError, LocalReplyRunner, ReplyBusyError, ReplyFailedError, warnLocalReplyFailure, type ReplyAgent, type ReplyRunner } from './local-replies.js';
 import { NtfyNotifier } from './notifications.js';
 import { ApprovalBroker, hookDecisionBody, type ApprovalDecision } from './approvals.js';
 import { defaultApprovalHoldSeconds } from './claude-hooks.js';
 import { connectRelay, relayBaseUrl } from './relay.js';
+import { UpdateChecker } from './updates.js';
 
 export interface HubRuntime {
   app: FastifyInstance;
@@ -67,7 +69,7 @@ function isReplyAgent(agent: AgentSession['agent']): agent is ReplyAgent {
 
 export function createHub(
   config: HubConfig,
-  options: { collectors?: Collector[]; staticDir?: string; replyRunner?: ReplyRunner } = {},
+  options: { collectors?: Collector[]; staticDir?: string; replyRunner?: ReplyRunner; updateChecker?: UpdateChecker } = {},
 ): HubRuntime {
   const app = Fastify({ logger: false, forceCloseConnections: true });
   const sessions = new Map<string, AgentSession>();
@@ -82,9 +84,11 @@ export function createHub(
     claude,
     new AntigravityCollector(config.lookbackDays),
     new DevinLocalCollector(),
+    ...(process.platform === 'win32' && config.aside?.enabled !== false ? [new AsideCollector()] : []),
     ...(config.devinApiKey || devinV3 ? [new DevinCollector(config.devinApiKey, undefined, devinV3)] : []),
     ...(config.codexCloud?.enabled ? [new CodexCloudCollector()] : []),
   ];
+  const updateChecker = options.updateChecker ?? new UpdateChecker(packageJson.version);
   const replyRunner = options.replyRunner ?? (config.localReplies?.enabled === false ? undefined : new LocalReplyRunner({
     commands: {
       codex: config.localReplies?.codex,
@@ -94,7 +98,9 @@ export function createHub(
   }));
   const collectorForSession = (session: AgentSession): Collector | undefined => session.id.startsWith('devin-local:')
     ? collectors.find((collector) => collector.name === 'devin-local')
-    : collectors.find((collector) => collector.name === session.agent);
+    : session.id.startsWith('aside:')
+      ? collectors.find((collector) => collector.name === 'aside')
+      : collectors.find((collector) => collector.name === session.agent);
   const notifier = new NtfyNotifier(config.ntfy?.topic ? config.ntfy : undefined);
   const approvals = new ApprovalBroker();
   const approvalsEnabled = config.approvals?.enabled !== false;
@@ -188,6 +194,7 @@ export function createHub(
     const proof = createHmac('sha256', config.token).update(nonce).digest('hex');
     return { ok: true, service: 'agent-hub', proof };
   });
+  app.get<{ Querystring: { force?: string } }>('/api/update', async (request) => updateChecker.check(request.query.force === '1'));
   app.addHook('preHandler', async (request, reply) => {
     if (request.url.startsWith('/api/') && !authorized(request, config.token)) {
       return reply.code(401).send({ error: 'Unauthorized' });
@@ -330,7 +337,13 @@ export function createHub(
       }
     }
     const result = approvals.decide(session.id, approvalId, decision as ApprovalDecision, answers);
-    if (result === 'none') return reply.code(409).send({ error: 'That request is no longer waiting. It may have been answered on the PC.' });
+    if (result === 'none') {
+      const collector = collectorForSession(session);
+      if (collector?.decideApproval && (await collector.decideApproval(session.nativeId, approvalId, decision)) === 'ok') {
+        return reply.code(204).send();
+      }
+      return reply.code(409).send({ error: 'That request is no longer waiting. It may have been answered on the PC.' });
+    }
     if (result === 'stale') return reply.code(409).send({ error: 'A newer request replaced this one. Check the chat again.' });
     return reply.code(204).send();
   });
