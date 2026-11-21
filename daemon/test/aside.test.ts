@@ -109,6 +109,39 @@ describe('AsideCollector', () => {
     expect(proc.killed).toBe(true);
   });
 
+  it('matches shortcut-hinted and variant button labels (Deny Esc, Allow this conversation ↵, Always allow this app)', async () => {
+    const runner = vi.fn(async (_script: string) => 'ok');
+    const watcher = fakeWatcherFactory();
+    const emitted: any[] = [];
+    const emit = Object.assign((s: any) => emitted.push(s), { remove: vi.fn() });
+
+    const collector = new AsideCollector(60_000, runner, 'win32', () => 1_700_000_000_000, watcher.spawn);
+    collector.start(emit);
+
+    watcher.instances[0]!.emitLine(JSON.stringify([
+      {
+        hwnd: '2001',
+        summary: 'Computer Use — Allow ChatGPT to use Microsoft Edge?',
+        buttons: ['Always allow this app', 'Deny Esc', 'Allow this conversation ↵'],
+      },
+    ]));
+    expect(emitted).toHaveLength(1);
+    expect(await collector.decideApproval(emitted[0].nativeId, emitted[0].approval.id, 'allow')).toBe('ok');
+    expect(runner.mock.calls[0]?.[0]).toContain("'Allow this conversation ↵', 'Always allow this app'");
+
+    watcher.instances[0]!.emitLine(JSON.stringify([
+      {
+        hwnd: '2002',
+        summary: 'Computer Use — Allow ChatGPT to use Microsoft Edge?',
+        buttons: ['Always allow this app', 'Deny Esc', 'Allow this conversation ↵'],
+      },
+    ]));
+    expect(await collector.decideApproval(emitted[1].nativeId, emitted[1].approval.id, 'deny')).toBe('ok');
+    expect(runner.mock.calls[1]?.[0]).toContain("'Deny Esc'");
+
+    collector.stop();
+  });
+
   it('restarts the watcher with backoff after exit', () => {
     vi.useFakeTimers();
     const watcher = fakeWatcherFactory();
