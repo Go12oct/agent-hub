@@ -33,7 +33,7 @@ const ALLOW_BUTTON_PRIORITY = [
 ];
 
 const SCAN_BODY = `
-$pids = @(Get-Process -Name 'Aside' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+$pids = @(Get-Process -Name 'Aside','ChatGPT','Codex' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 if ($pids.Count -eq 0) {
   '[]'
 } else {
@@ -50,7 +50,7 @@ if ($pids.Count -eq 0) {
     for ($i = 0; $i -lt $buttons.Count; $i++) {
       $btn = $buttons.Item($i)
       $name = ($btn.Current.Name | Out-String).Trim()
-      if ($name -ne 'Deny') { continue }
+      if ($name -notmatch '^Deny(?:\\b|\\s|$)') { continue }
       $container = $walker.GetParent($btn)
       for ($depth = 0; $depth -lt 4 -and $container; $depth++) {
         $sibButtons = $container.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
@@ -60,13 +60,18 @@ if ($pids.Count -eq 0) {
           if ($bName) { $names += $bName }
         }
         $hasAllow = $false
-        foreach ($a in $allowNames) { if ($names -contains $a) { $hasAllow = $true; break } }
+        foreach ($p in $allowPatterns) {
+          foreach ($n in $names) {
+            if ($n -match $p) { $hasAllow = $true; break }
+          }
+          if ($hasAllow) { break }
+        }
         if ($hasAllow) {
           $texts = $container.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)
           $lines = @()
           for ($t = 0; $t -lt $texts.Count; $t++) {
             $txt = ($texts.Item($t).Current.Name | Out-String).Trim()
-            if ($txt -and ($names -notcontains $txt) -and ($lines -notcontains $txt)) { $lines += $txt }
+            if ($txt -and $txt -ne 'See details' -and ($names -notcontains $txt) -and ($lines -notcontains $txt)) { $lines += $txt }
           }
           $key = ($lines -join '|') + '|' + ($names -join ',')
           if (-not $seenContainers.ContainsKey($key) -and $lines.Count -gt 0) {
@@ -96,7 +101,7 @@ $ct = [System.Windows.Automation.ControlType]
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $btnCond = New-Object System.Windows.Automation.PropertyCondition($uia::ControlTypeProperty, $ct::Button)
 $textCond = New-Object System.Windows.Automation.PropertyCondition($uia::ControlTypeProperty, $ct::Text)
-$allowNames = @('Allow once', 'Allow this conversation', 'Always allow', 'Allow for all sites')
+$allowPatterns = @('^Allow once(?:\\b|\\s|$)', '^Allow this conversation(?:\\b|\\s|$)', '^Always allow(?:\\b|\\s|$)', '^Allow for all sites(?:\\b|\\s|$)')
 `;
 
 export const SCAN_SCRIPT = `${UIA_PREAMBLE}
@@ -143,7 +148,7 @@ foreach ($targetName in $targets) {
   for ($i = 0; $i -lt $buttons.Count; $i++) {
     $btn = $buttons.Item($i)
     $name = ($btn.Current.Name | Out-String).Trim()
-    if ($name -eq $targetName) {
+    if ($name -eq $targetName -or $name.StartsWith($targetName, [StringComparison]::OrdinalIgnoreCase)) {
       $pattern = $null
       if ($btn.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         $pattern.Invoke()
@@ -334,10 +339,13 @@ export class AsideCollector implements Collector {
     const entry = this.active.get(id);
     if (!entry) return 'none';
     const buttonNames = decision === 'deny'
-      ? ['Deny']
-      : ALLOW_BUTTON_PRIORITY.filter((name) => entry.prompt.buttons.includes(name));
-    if (!buttonNames.length) return 'none';
-    const result = await this.runner(clickScript(entry.prompt.hwnd, buttonNames));
+      ? entry.prompt.buttons.filter((name) => /^Deny(?:\b|\s|$)/i.test(name))
+      : ALLOW_BUTTON_PRIORITY.flatMap((prefix) =>
+        entry.prompt.buttons.filter((name) => name.toLowerCase().startsWith(prefix.toLowerCase())),
+      );
+    const targets = buttonNames.length ? [...new Set(buttonNames)] : (decision === 'deny' ? ['Deny'] : []);
+    if (!targets.length) return 'none';
+    const result = await this.runner(clickScript(entry.prompt.hwnd, targets));
     if (result.trim() !== 'ok') return 'none';
     this.active.delete(id);
     this.emit?.remove?.(id);
