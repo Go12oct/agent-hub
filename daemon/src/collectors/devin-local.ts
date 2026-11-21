@@ -3,6 +3,7 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import type { AgentSession, SessionMessage } from '@agent-hub/shared';
 import type { Collector, EmitSession } from './types.js';
+import { sanitizeDisplayText } from './files.js';
 
 interface MessageNode {
   node_id: number | string;
@@ -208,7 +209,7 @@ export class DevinLocalCollector implements Collector {
           ...(row.working_directory ? { cwd: row.working_directory } : {}),
           status,
           canReply: false,
-          ...(lastMessage ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role } : {}),
+          ...(lastMessage ? { lastMessage: sanitizeDisplayText(lastMessage.text).slice(0, 280), lastRole: lastMessage.role } : {}),
           ...(startedAt ? { startedAt } : {}),
           updatedAt,
           machine: os.hostname(),

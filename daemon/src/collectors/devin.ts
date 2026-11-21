@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentSession, PendingApproval, SessionMessage, SessionStatus } from '@agent-hub/shared';
 import type { Collector, EmitSession } from './types.js';
-import { projectName } from './files.js';
+import { projectName, sanitizeDisplayText } from './files.js';
 import { readDevinDesktopCards } from './devin-desktop-cards.js';
 
 export function parseDevinMessages(rows: unknown): SessionMessage[] {
@@ -161,7 +161,7 @@ export class DevinCollector implements Collector {
       const lastMessage = messages.filter((item) => item.role !== 'tool').at(-1);
       const baseSession = this.apiSessions.get(id);
       if (baseSession && lastMessage) {
-        const updatedBase = { ...baseSession, lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role };
+        const updatedBase = { ...baseSession, lastMessage: sanitizeDisplayText(lastMessage.text).slice(0, 280), lastRole: lastMessage.role };
         this.apiSessions.set(id, updatedBase);
         const updated = this.withDesktopCards(updatedBase);
         this.sessions.set(id, updated);
@@ -242,7 +242,7 @@ export class DevinCollector implements Collector {
           ...(project ? { project } : {}),
           status,
           ...(lastMessage
-            ? { lastMessage: lastMessage.text.slice(0, 280), lastRole: lastMessage.role }
+            ? { lastMessage: sanitizeDisplayText(lastMessage.text).slice(0, 280), lastRole: lastMessage.role }
             : {}),
           canReply: Boolean(this.apiKey),
           updatedAt, ...(createdAt ? { startedAt: createdAt } : {}),

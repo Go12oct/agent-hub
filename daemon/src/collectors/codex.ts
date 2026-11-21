@@ -2,25 +2,32 @@ import path from 'node:path';
 import { readdir } from 'node:fs/promises';
 import type { AgentSession, SessionMessage, SessionStatus } from '@agent-hub/shared';
 import { agentHome } from '../config.js';
-import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
+import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, sanitizeDisplayText, sanitizeTitle, textFromContent } from './files.js';
 import { WatchedCollector } from './watched.js';
 import type { ParsedWatchedSession } from './watched.js';
 import type { EmitSession } from './types.js';
 import { activeHookOverride, hookOverrideForFile, type HookOverride } from './hook-overrides.js';
 
 function isCodexPromptPreamble(text: string): boolean {
-  return /^(?:<environment_context>|<instructions>|<user_instructions>|<system-reminder>|# AGENTS\.md instructions)/i.test(text.trim());
+  return /^(?:<environment_context>|<instructions>|<user_instructions>|<system-reminder>|<openbot_saved_memories>|# AGENTS\.md instructions)/i.test(text.trim());
 }
 
 function textFromUserContent(content: unknown): string {
   const blocks = Array.isArray(content) ? content : [content];
   return blocks.map((block) => {
-    if (typeof block === 'string') return block;
-    if (!block || typeof block !== 'object') return '';
-    const item = block as Record<string, unknown>;
-    if (typeof item.input_text === 'string') return item.input_text;
-    return typeof item.text === 'string' ? item.text : '';
-  }).filter((text) => text && !isCodexPromptPreamble(text)).join('\n');
+    const raw = typeof block === 'string'
+      ? block
+      : block && typeof block === 'object'
+        ? typeof (block as Record<string, unknown>).input_text === 'string'
+          ? String((block as Record<string, unknown>).input_text)
+          : typeof (block as Record<string, unknown>).text === 'string'
+            ? String((block as Record<string, unknown>).text)
+            : ''
+        : '';
+    if (!raw) return '';
+    const cleaned = sanitizeDisplayText(raw);
+    return cleaned && !isCodexPromptPreamble(cleaned) ? cleaned : '';
+  }).filter(Boolean).join('\n');
 }
 
 export interface CodexHookPayload {
@@ -103,13 +110,14 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
     if (record.type === 'response_item' && payload.type === 'message') {
       const role = payload.role;
       if (role === 'user' || role === 'assistant') lastActivityIndex = index;
-      const text = role === 'user' ? textFromUserContent(payload.content) : textFromContent(payload.content);
+      const rawText = role === 'user' ? textFromUserContent(payload.content) : textFromContent(payload.content);
+      const text = sanitizeDisplayText(rawText);
       if (!text) continue;
       if (role === 'user') {
-        if (isCodexPromptPreamble(text)) continue;
+        if (isCodexPromptPreamble(rawText) && !text) continue;
         output.push(message(text, 'user', record.timestamp));
-        if (!title && !isCodexPromptPreamble(text)) {
-          title = text.trim().slice(0, 180);
+        if (!title) {
+          title = sanitizeTitle(rawText);
         }
         lastRole = 'user';
         lastMessage = text;
@@ -125,14 +133,15 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       const kind = String(payload.type || '');
       approvalRequested = /approval_request$/.test(kind);
       approvalTimestamp = approvalRequested ? record.timestamp || timestamp : undefined;
-      const text = String(payload.message || payload.text || payload.content || '');
+      const rawText = String(payload.message || payload.text || payload.content || '');
+      const text = sanitizeDisplayText(rawText);
       if (kind === 'user_message' || kind === 'agent_message') {
         const role = kind === 'user_message' ? 'user' : 'assistant';
         lastActivityIndex = index;
-        if (role === 'user' && isCodexPromptPreamble(text)) continue;
+        if (role === 'user' && isCodexPromptPreamble(rawText) && !text) continue;
         if (text) output.push(message(text, role, record.timestamp));
         if (role === 'user') {
-          if (!title && text && !isCodexPromptPreamble(text)) title = text.trim().slice(0, 180);
+          if (!title && rawText) title = sanitizeTitle(rawText);
           completed = false;
         } else completed = false;
         lastRole = role;
@@ -175,7 +184,7 @@ export function parseCodexRecords(records: Record<string, any>[], fileId = 'unkn
       updatedAt, startedAt: meta.timestamp,
       status: explicitStatus || inferStatus(updatedAt, lastRole, completed, error, now),
       lastMessage: error ? formatErrorMessage(lastErrorMessage)
-        : explicitStatus && !lastMessage ? 'Waiting for approval' : lastMessage?.slice(-280),
+        : explicitStatus && !lastMessage ? 'Waiting for approval' : (lastMessage ? sanitizeDisplayText(lastMessage) : undefined)?.slice(-280),
       lastRole,
     }),
     messages: output,

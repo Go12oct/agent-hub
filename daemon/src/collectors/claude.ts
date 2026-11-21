@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { agentHome } from '../config.js';
-import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, textFromContent } from './files.js';
+import { buildSession, inferStatus, isoOrNow, message, parseJsonLines, sanitizeDisplayText, sanitizeTitle, textFromContent } from './files.js';
 import { defaultApprovalHoldSeconds } from '../claude-hooks.js';
 import type { EmitSession } from './types.js';
 import { WatchedCollector } from './watched.js';
@@ -14,9 +14,8 @@ import {
 } from './hook-overrides.js';
 
 export function claudeTitle(text: string): string | undefined {
-  const clean = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-  if (!clean || /^(<environment_context>|<instructions>)/i.test(clean)) return undefined;
-  return clean.slice(0, 180);
+  if (/^(?:<environment_context>|<instructions>)/i.test(text.trim())) return undefined;
+  return sanitizeTitle(text);
 }
 
 export interface ClaudeHookPayload {
@@ -139,7 +138,7 @@ export function parseClaudeRecords(
     session: buildSession({
       agent: 'claude-code', nativeId, title, cwd, branch, updatedAt, startedAt: records[0]?.timestamp,
       status: inferStatus(updatedAt, lastRole, complete, errored, now),
-      lastMessage: errored ? formatErrorMessage(lastErrorMessage) : lastMessage?.slice(-280), lastRole,
+      lastMessage: errored ? formatErrorMessage(lastErrorMessage) : (lastMessage ? sanitizeDisplayText(lastMessage) : undefined)?.slice(-280), lastRole,
     }),
     messages,
     statusFacts,

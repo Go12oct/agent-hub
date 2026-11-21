@@ -487,7 +487,10 @@ export function AgentHub() {
     sessions.forEach((session) => map.set(session.agent, (map.get(session.agent) || 0) + 1));
     return map;
   }, [sessions]);
-  const tabs = agentOrder.filter((agent) => agent !== 'codex-cloud' || counts.has(agent));
+  const tabs = agentOrder.filter((agent) => counts.has(agent));
+  useEffect(() => {
+    if (selectedAgent !== 'all' && !counts.has(selectedAgent)) setSelectedAgent('all');
+  }, [counts, selectedAgent]);
 
   useEffect(() => {
     const screen = document.querySelector<HTMLElement>('.screen');
@@ -621,14 +624,16 @@ export function AgentHub() {
         )}
       </header>
 
-      <nav className="tabs" aria-label="Filter by app">
-        <button className={selectedAgent === 'all' ? 'tab active' : 'tab'} onClick={() => setSelectedAgent('all')}>All <span>{sessions.length}</span></button>
-        {tabs.map((agent) => (
-          <button key={agent} className={selectedAgent === agent ? `tab active ${agent}` : `tab ${agent}`} onClick={() => setSelectedAgent(agent)}>
-            {agentLabels[agent]} <span>{counts.get(agent) || 0}</span>
-          </button>
-        ))}
-      </nav>
+      {tabs.length > 0 && (
+        <nav className="tabs" aria-label="Filter by app">
+          <button className={selectedAgent === 'all' ? 'tab active' : 'tab'} onClick={() => setSelectedAgent('all')}>All <span>{sessions.length}</span></button>
+          {tabs.map((agent) => (
+            <button key={agent} className={selectedAgent === agent ? `tab active ${agent}` : `tab ${agent}`} onClick={() => setSelectedAgent(agent)}>
+              {agentLabels[agent]} <span>{counts.get(agent) || 0}</span>
+            </button>
+          ))}
+        </nav>
+      )}
 
       {showUpdateBanner && updateStatus?.latestVersion && (
         <div className="update-banner" role="status">
